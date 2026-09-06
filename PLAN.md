@@ -172,11 +172,10 @@ definition-of-done somewhere in section 8:
 
 ### 4.2 Modules and dependency direction
 
-SwiftPM package `swiftemacs`, Swift 6 language mode. `package` access is visibility only;
-cross-module optimisation needs `-package-cmo` (present in this toolchain's `swiftc -help`)
-or `@inlinable`/`@usableFromInline` on the hot paths, and M0 benchmarks one hot call across
-the `Lisp`↔`Editor`↔`Text` boundary to prove the flag works. Dependencies point downward
-only.
+SwiftPM package `swiftemacs`, Swift 6 language mode. Dependencies point downward only.
+`package` access is visibility only, and M0 settled how the project actually gets
+cross-module optimisation — see "Cross-module optimisation" below; the short answer is no
+build flags at all.
 
 ```
 Sources/
@@ -197,8 +196,12 @@ Sources/
   Org/                 org parser, element tree, org index, agenda/capture/export
   Git/                 CLI driver, porcelain parsers, diff model, status/log/blame views
   Extensions/          manifests, package manager, Wasm host, XPC host, native module ABI
-  Platform/            C shims (sys_icache_invalidate, MAP_JIT helpers, PTY ioctls),
-                       FSEvents, process spawning with DispatchIO, energy/latency telemetry
+  Platform/            the Swift face of the platform: FSEvents, process spawning with
+                       DispatchIO, energy/latency telemetry, signposts, the main-actor
+                       watchdog, MetricKit, the launch-time self-test
+  CPlatform/           the only C target that is not a vendored library: sys_icache_invalidate,
+                       MAP_JIT helpers, PTY ioctls. Each shim carries a header comment
+                       saying why Swift could not express it
 lisp/                  the shipped Elisp library (simple, subr, modes, verilog, org glue)
 queries/               tree-sitter .scm files, one directory per language
 Tests/                 Swift Testing suites per module; golden-image tests for Canvas;
@@ -208,9 +211,53 @@ dev/                   screenshot driver, LSP probe, mutation runner, benchmark 
 ```
 
 Dependency direction: `App → Chrome → Canvas/Terminal → Editor → Text`, `Editor → Lisp`,
-`Lang/Org/Git → Editor + Lisp`, `Extensions → Lisp + Editor + Platform`. `Lisp` and `Text`
-depend on nothing above them and are testable in isolation; `Canvas` depends on `Text` (for
-snapshots) and on the `DisplaySnapshot` type owned by `Editor`, never on `Lisp`.
+`Lisp → Text`, `Lang/Org/Git → Editor + Lisp`, `Extensions → Lisp + Editor + Platform`.
+`Text` depends on nothing above it and both `Text` and `Lisp` are testable in isolation;
+`Canvas` depends on `Text` (for snapshots) and on the `DisplaySnapshot` type owned by
+`Editor`, never on `Lisp`. All C code lives in the `CPlatform` C target, wrapped by
+`Platform`; no other target contains C.
+
+The `Lisp → Text` edge is not decoration and was added in M0 after the cross-module study
+found it missing. 4.6 puts the buffer-editing primitives, markers and the regex engine in
+`Lisp`, and says the regex engine runs "on the rope's chunks without copying" — which is
+impossible if `Lisp` cannot name a rope type. The alternative, a protocol defined in `Lisp`
+and conformed by `Editor`, was rejected: cross-module generic and existential calls are not
+devirtualised in any build configuration measured on this toolchain, so every scanned byte
+would pay a witness call. `Lisp` therefore sees rope and chunk *types*; buffer, window and
+command-loop *objects* stay in `Editor`, so the layering argument is unchanged.
+
+**Cross-module optimisation.** The package builds with no `-package-cmo`, no
+`-enable-library-evolution` and no `unsafeFlags` of any kind. Default access is `package`
+and compiles to a real cross-module call. A call a benchmark shows is hot is promoted
+deliberately in the source: the containing type becomes `public`, the hot members get
+`@inlinable`, and anything an inlinable body touches gets `@usableFromInline`. Measured on
+this machine (Swift 6.3.3, a two-op member called in a 100M-iteration cross-module loop,
+best of three):
+
+| shape | no flags | `-enable-library-evolution` + `-Xfrontend -package-cmo` + `-Xfrontend -allow-non-resilient-access` | `-enable-library-evolution` alone |
+|---|---|---|---|
+| plain `package func` (cold default) | 0.3309 s | 0.3319 s | 0.3313 s |
+| `@inlinable` member of a **`public`** type | **0.0135 s** | 0.0135 s | 0.0762 s |
+| `@inlinable` member of a **`package`** type | 0.0763 s | 0.0133 s | 0.0763 s |
+
+Three things follow. The promoted shape reaches the same peak with no flags as package CMO
+does with them, so the flags buy no speed — only the ability to keep the hot surface at
+`package` visibility. `@inlinable` on a member of a `package` type does nothing without
+those flags, so it is the *type* that must be promoted, not the member (an earlier version
+of `CLAUDE.md` got this wrong). And library evolution without CMO is a 5.6x cliff on the
+promoted shape, so a design resting on package CMO rests on an optimiser pass whose
+bail-outs are silent, with a worse floor than doing nothing. Rejected alternatives and the
+falsification plan are in 4.16.
+
+The promoted hot surface is listed here explicitly, because it is now a source-level
+decision rather than a build-flag one, and it is guarded by `dev/check-inlining.sh` (one
+stock release build; asserts the promoted symbols are absent from the caller's object file
+and the cold controls are still present). As of M0 it is empty apart from the probes; the
+candidates, in the order the milestones need them, are: `Text.Chunk` and its byte
+subscript; the `Text` snapshot cursor and its chunk-batch iteration; `Text.Anchor`
+resolution; `Lisp`'s tagged `UInt64` value (tag test, fixnum extract, pointer decode) and
+the arena accessors; and the line/run accessors of `Editor.DisplaySnapshot` that `Canvas`
+reads. Everything else stays `package` and cold by default.
 
 ### 4.3 Threading and data flow
 
@@ -698,6 +745,7 @@ protocol below.
 |---|---|---|
 | Custom Metal canvas | NSTextView / TextKit 2 drawing | no evidence of 120 Hz on large files; glyph-imprecise invalidation; would repeat Emacs's "display owns everything" coupling |
 | Rope | gap buffer (Emacs, Reticle), piece table (VS Code) | gap buffer has no O(1) snapshots for background readers; piece tables fragment under heavy editing |
+| `@inlinable` on a `public` type for hot cross-module calls (M0) | library evolution + package CMO; merging `Text`/`Lisp` into one module; a protocol boundary | measured parity with package CMO at zero flags (0.0135 s vs 0.0133 s), and package CMO's prerequisite — library evolution — is a 5.6x cliff whenever its silent bail-outs fire. Merging modules buys nothing once the call is inlined and gives up the only enforcement of "`Canvas` never imports `Lisp`". A protocol boundary was measured non-devirtualised in every configuration |
 | Tagged words + own GC | ARC-managed Lisp objects + cycle collector (Reticle) | measured 5x on traversal, recursive-release crashes, cycle leaks, and it forecloses a JIT |
 | One Elisp thread | actor per buffer | breaks `set-buffer` semantics that every config relies on; parallelism goes to readers instead |
 | Bytecode VM, no JIT | Cranelift-style JIT first (Reticle) | 575x on loops, 1.0x on `fib`; editor time is in runtime calls, not dispatch |
@@ -1112,15 +1160,218 @@ App Nap via activity assertions; no App Store.
 
 ---
 
-## Handover: state after planning, 2026-09-05
+## 11. Milestone records
 
-- Nothing is built. The repository holds `PLAN.md`, `CLAUDE.md`, `doc/research/` (16
-  reports + context), `dev/spikes/` (five spikes with `RESULTS.md`), `.gitignore`. No
-  `git init` yet (the owner decides when).
-- Next work item: **M0 Repository and gate** (section 8), then M1.1 onward, one sub-
+### M0 Repository and gate — done 2026-09-06
+
+Split into M0.1 (package skeleton, gate, the cross-module study) and M0.2 (app bundle,
+hardened-runtime self-test, telemetry, screenshot driver), per the granularity rule in
+section 8.
+
+**Definition of done, as actually run by the main conversation:**
+
+| Check | Result |
+|---|---|
+| `dev/gate.sh` | `Test run with 20 tests in 9 suites passed`; `all stages passed` |
+| `dev/check-inlining.sh` | `hot text=0 lisp=0` (want 0), `cold text=1 lisp=1` (want >0) |
+| `dev/make-app-bundle.sh` | assembled, ad-hoc signed with `--options runtime` + entitlements |
+| `--self-test` **from inside the signed bundle** | `PASS MAP_JIT`, `PASS dlopen`, exit 0 |
+| `codesign --verify --strict` | `valid on disk`, `satisfies its Designated Requirement` |
+| `dev/gui-shot.sh` | 1200x832 native window, title `swiftemacs`, empty content view |
+
+**The entitlements are load-bearing, and that was falsified rather than assumed.** The
+bundle was copied three times and each copy re-signed with a reduced entitlements plist:
+
+| Entitlements carried | MAP_JIT | dlopen | exit |
+|---|---|---|---|
+| allow-jit + disable-library-validation | PASS | PASS | 0 |
+| disable-library-validation only | FAIL, `errno=22 (Invalid argument)` | PASS | 1 |
+| allow-jit only | PASS | FAIL, `different Team IDs` | 1 |
+| neither | FAIL | FAIL | 1 |
+
+Each check fails exactly when its own entitlement is withheld, and only then. Note for
+future readers: the *unbundled* `.build/release/swiftemacs --self-test` also prints two
+PASSes and proves nothing — `codesign -dv` shows `adhoc,linker-signed` with no hardened
+runtime, so neither restriction is being enforced there. Only the bundle
+(`adhoc,runtime`, `Runtime Version=26.5.0`) is the real test.
+
+**The cross-module optimisation question was reopened and settled the other way.** The plan
+said M0 would prove `-package-cmo` works. It does not work as the plan assumed, and the
+first measurement of it was wrong in a way worth recording:
+
+1. `swiftc -package-cmo` and `-allow-non-resilient-access` appear in `swiftc -help` and are
+   accepted without error, but the driver **never forwards them to the frontend**
+   (`swiftc -v` shows only `-package-name`; the emitted `.swiftmodule` is byte-identical
+   with and without them). They take effect only as `-Xfrontend -package-cmo -Xfrontend
+   -allow-non-resilient-access`, and only alongside `-enable-library-evolution`.
+2. With all three, the cross-module `package` call is inlined. But `@inlinable` on a member
+   of a **`public`** type reaches the same speed with **no flags at all** (0.0135 s vs
+   0.0133 s over 100M iterations), so the flags buy no peak performance — only the ability
+   to keep the hot surface at `package` visibility. Library evolution *without* CMO is a
+   5.6x cliff on that same shape (0.0135 → 0.0762 s), so option A's floor is worse than
+   doing nothing while its ceiling is identical.
+3. `@inlinable` on a member of a `package` type does nothing without those flags. The
+   convention in `CLAUDE.md` said the opposite and has been corrected: it is the *type*
+   that gets promoted, not the member.
+
+Decision and its rationale are in 4.2 and 4.16; `dev/check-inlining.sh` is the standing
+regression test. The `Lisp → Text` dependency edge was added here too, resolving a
+contradiction the study surfaced between 4.6 (the regex engine scans the rope's chunks) and
+4.2 (which gave `Lisp` no way to name a rope type).
+
+**Review and mutation.** A cold review produced twelve findings; three were real defects —
+`dev/check-inlining.sh` picking its object file non-deterministically between the debug and
+release trees, a `close()` race in `MainActorWatchdog` that could leave the thread running
+forever while `isRunning` reported `false`, and a `.unsafeFlags` linker setting
+contradicting the "no unsafeFlags" rule stated in the same commit. All eleven actioned
+findings were fixed and the checklist was executed by the main conversation, never by the
+implementer. Nine of eleven mutations were killed. Three results are worth carrying
+forward:
+
+- **`@inlinable` does not oblige the optimiser to inline.** Deleting `@inlinable` from the
+  probe originally changed nothing, because at ~5 statements a `public` cross-module call
+  is inlined either way. Measured band on this machine: 4 statements → inlined annotated or
+  not; 8-16 → inlined only when annotated; 24+ → never. The probes were lengthened to 12
+  statements, inside the band, and `dev/check-inlining.sh` now counts each probe body and
+  refuses to run if either has left it. **Consequence for the design: promoted hot members
+  must stay small** — which is what the promoted surface in 4.2 already consists of.
+- **A defence whose only observer is a tautology is not covered.** Three teardown tests
+  asserted `isRunning == false` after `close()`, which is true the instant `close()` sets
+  `closed` whether or not the thread ever exits — exactly how the race stayed invisible.
+  They now assert on `isThreadAlive`, which reports the thread's physical state.
+- **`CFRunLoopStop` in `close()` is not mutation-observable** and is recorded as such
+  rather than pretended: `timer.invalidate()` runs first and `RunLoop.run()` returns once
+  its last timer is gone, so the thread exits either way. The `dlopen` half of the
+  self-test likewise has no `swift test`-level observer; the entitlement matrix above is
+  its evidence.
+
+**Cold-read coverage: four rounds, and the loop rule was rewritten during them.** Round 1
+read the whole milestone (twelve findings, three real defects). Round 2 read the fix round
+and the probe/watchdog changes made while running the mutation checklist (eight findings;
+the best one in the milestone was that three teardown tests asserted `isRunning == false`,
+which is true the instant `close()` sets `closed` whether or not the thread ever exits —
+exactly the mechanism by which the `close()` race had stayed invisible. One of its eight
+was itself mistaken: it said `CLAUDE.md` does not claim "no unsafeFlags", which the same
+commit's `CLAUDE.md` does say. Reviewers are refuted the same way as anyone else.)
+
+Acting on round 2 produced a fourth batch which, under the old "one trailing round, no
+recursion" rule, would have shipped unread: the three teardown tests switched to
+`isThreadAlive`; `dev/check-inlining.sh` gained a probe body-length guard and had its
+object-file lookup reimplemented from `find` to a shell glob (the substantive part of that
+lookup — constrain to the release tree, error on more than one match — was in the fix round
+and round 2 had read it; only the mechanism changed here); `MetricsSubscriber`'s counters
+became lock-taking accessors; and the parallel statement-count constant was deleted in
+favour of the check in the script. **That batch was
+not harmless.** The new guard's first version averaged the two probe bodies, so a
+mutation that shortened only the hot one survived it — caught because the main conversation
+happened to run that mutation, by no review at all. `CLAUDE.md` step 7 now requires rounds
+until the trailing diff is empty, anchored on the git index rather than on the coordinator's
+memory.
+
+That mutation is the only evidence cited for changing the loop rule, so it is recorded as a
+recipe rather than as a memory: the buggy draft was never committed, and a later reviewer
+looking for it found nothing either way. From this tree — replace the per-body `awk` counter
+in `dev/check-inlining.sh` with `statements=$(grep -c '^        v = (v ' "$probe")` and
+`per_body=$((statements / 2))`, dropping the `hot_n`/`cold_n` equality check with it, then
+delete eight mixing statements from `TextHotProbe.packedByteLength` only, leaving
+`TextColdProbe` at twelve. The averaged guard prints `8 mixing statements per body (band is
+8-16)`, the symbol check still passes (`hot text=0 lisp=0 | cold text=1 lisp=1`, because a
+four-statement body is inlined with or without the annotation), and the script exits 0.
+Restore the per-body counter and the same mutation exits 1 with `Sources/Text/
+InliningProbe.swift's hot body has 4 mixing statements`. Re-measured 2026-09-06, after the
+milestone was committed and prompted by the question of which working artifacts were worth
+keeping: the answer was none of them, because a claim worth keeping should be reproducible
+from the tree instead. A cold reader then ran this recipe in a throwaway copy of the tree
+and reproduced both directions with the quoted strings matching byte for byte. It declined
+one point, recorded here: the recipe does not spell out that the band-range loop over
+`hot_n`/`cold_n` has to be collapsed along with the counter, so it is not literally
+guess-free — though it judged the guess forced and reproduced the exact output on its first
+attempt.
+
+Round 3 read that batch and found no correctness defect. Its two open items:
+
+- *The lock added to `MetricsSubscriber`'s counters is not observable by any test* — true,
+  and now said so in `Sources/Platform/Metrics.swift` rather than left implied. Every caller
+  is single-threaded, so the value is the same either way; what is observable is the
+  counting, and deleting either increment fails `MetricsTests`.
+- *`Thread.sleep` in the tests' `expectThreadGone` helper might starve Swift Testing's
+  cooperative pool under `--parallel`* — the reviewer recorded it unresolved after three
+  attempts to settle it by reading. Settled here by measurement instead: ten consecutive
+  full parallel runs (0.707-0.729 s, 20/20 tests each) and twelve filtered
+  `MainActorWatchdogTests` runs (0.717-0.727 s, 6/6 each). No starvation, no flakiness; the
+  retry loop almost always exits on its first read, which is what the timings say. Per
+  `CLAUDE.md`, "flaky" needs an observation, and there is none.
+
+Round 4 read the batch that produced (a doc comment and these two records) and blocked the
+commit over a factual error in it: the incident note then said the unread batch had changed
+`dev/gate.sh`'s verdict, which is false — that change was in the fix round and round 2 had
+read it. Corrected above and in `CLAUDE.md`. It also found a sentence duplicated by a bad
+edit, and four rule-quality gaps that were adopted: persist the review boundary in the git
+index, rerun the gate before re-reviewing a batch that touched product code, state the
+"decline and record" exit symmetrically so the loop cannot be churned by wording
+disagreements, and tell reviewers plainly that "nothing to change" is what ends it.
+
+Rounds 5 and 6 closed it. Round 5 blocked on a second misattribution of the same species
+as round 4's — the record claimed the unreviewed batch had changed the object-file lookup in
+`dev/check-inlining.sh` "from a `find` over all of `.build` to an explicit release glob",
+when the substantive half of that lookup was in the fix round and round 2 had read it. Two
+such errors in a row, both overstating what went unreviewed, is a pattern worth naming: a
+coordinator writing its own history from memory drifts toward the more dramatic version, and
+the artifacts (`git cat-file` on the pre-review blob, the reviewed diff, the current file)
+are the oracle. Round 5 also closed two gaps in the new rule: `Tests/` was missing from the
+list of directories whose modification requires rerunning the gate before re-review — which
+contradicted the same step's rejection of an "it was only tests" exemption — and the
+git-index anchor had no warning that staging anything for an unrelated reason while a round
+is out silently moves files into "already read".
+
+Round 6 found no factual error and declined to push two true-but-imprecise phrasings:
+`PLAN.md`'s gloss calling `Tests/` "product code", and `CLAUDE.md`'s "the one way to break
+this silently is to `git add`", which is true in this project's workflow but not literally
+exhaustive (`git rm`, `git mv`, `git reset` would do it too, and none is ever prescribed
+here). It also noted, outside the diff's scope, that `dev/check-inlining.sh`'s glob
+`.build/*/release/...` requires exactly one path segment where the `find` it replaced would
+also have matched `.build/release/...`; on this toolchain only the former exists, and if
+SwiftPM's layout ever changes the glob stays unexpanded and the script's `[ ! -f "$OBJ" ]`
+guard fails loudly rather than silently picking the wrong object. All three are recorded
+here rather than acted on.
+
+Round 7 read the base case itself and found no factual error. It declined two
+wording-precision points, transcribed here as the loop's terminator: that the base case's
+closing clause voids the exemption "the moment it makes any new claim about *the code*",
+which is narrower than what it guards against (a smuggled claim about process or tooling
+would not be "the code" under a hyper-literal reading) — though it observed the exemption is
+scoped to record entries, so anything else falls back to the default rule regardless; and
+that step 7's "do not proceed to step 8 while an unreviewed change exists" is not
+cross-referenced to the base case sitting just above it, so a reader could momentarily
+read a record-only edit as forbidden. Neither was acted on, which is what ends the loop —
+seven rounds, and the last three found nothing that changed a line of code.
+
+Two methodology notes for later milestones. Swift Testing's `--filter` matches the *type*
+name, not the `@Suite` display name: a filter that matches nothing yields "Test run with 0
+tests ... passed" and exit 0, which reads exactly like a surviving mutation — the mutation
+runner must assert that tests actually ran, and `dev/gate.sh` now rejects a zero-test run.
+And test seams must be per-instance: two hooks added to `MainActorWatchdog` were first
+written as statics, and because Swift Testing runs suites in parallel every other test's
+watchdog parked in them.
+
+**Known gaps carried forward.** No icon artwork exists, so the bundle carries none;
+`dev/make-app-bundle.sh` compiles `assets/icon/swiftemacs.icon` only if it appears, and the
+gap closes in M7 with the rest of the visual work. `versionString()` in `Sources/App` has
+no test target. Neither blocks anything.
+
+---
+
+## Handover: state after M0, 2026-09-06
+
+- `git init` done; two commits per milestone as `CLAUDE.md` prescribes. M0 is built and its
+  record is in section 11.
+- Next work item: **M1.1 rope** (section 8's M1 family), then the rest of M1 one sub-
   milestone at a time through the loop in `CLAUDE.md`.
-- The owner asked that the implementation sessions run on **opus** (this planning session
+- The owner asked that the implementation sessions run on **opus** (the planning session
   ran on Fable and was judged too expensive) and that "which approach" decisions be made
   without asking.
 - Open owner-independent questions live in 4.17 and are settled by the spikes named there,
-  starting with the M6 display-link spike; nothing in M0-M5 depends on them.
+  starting with the M6 display-link spike; nothing in M1-M5 depends on them.
+- The cross-module convention that M1 must follow is in 4.2: default `package` and cold;
+  promote a *type* to `public` with `@inlinable` members only where a benchmark shows the
+  boundary is hot, keep those members small, and let `dev/check-inlining.sh` hold the line.
