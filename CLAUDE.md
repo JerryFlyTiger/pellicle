@@ -67,12 +67,25 @@ The gate is cheap: run it, do not plan around it.
 
 Swift conventions: Swift 6 language mode with strict concurrency; no `-Ounchecked` or
 `-enforce-exclusivity=unchecked` project-wide (Apple advises against it and the spike showed
-no gain); `package` access with `@inlinable package` across modules, `final` classes on hot
-paths; no force-unwrap or `try!` in product code (tests may); C shims live only in
-`Sources/Platform` with a header comment saying why Swift could not do it; anything holding
+no gain); `final` classes on hot paths; no force-unwrap or `try!` in product code (tests
+may); C shims live only in `Sources/CPlatform`, wrapped by `Sources/Platform`, with a
+header comment saying why Swift could not do it; anything holding
 a resource has an explicit `close()`, never an `isolated deinit`; long chains are torn down
 iteratively (the 1M-node recursive-release segfault is a measured fact on this machine);
 every timer has a tolerance; nothing polls.
+
+**Cross-module optimisation.** The package builds with **no** `-package-cmo`, no
+`-enable-library-evolution` and no `unsafeFlags`; default access is `package`, which is
+visibility only. A call a benchmark shows is hot across a module boundary is promoted
+deliberately in the source: **the containing type becomes `public`, the hot members get
+`@inlinable`, and anything an inlinable body touches gets `@usableFromInline`.** Promoting
+the member alone does nothing — on Swift 6.3.3 `@inlinable` has no effect on a member of a
+`package` type. Never rely on a plain `public` function being inlined; that is an
+unannotated heuristic with a size threshold. `dev/check-inlining.sh` is the standing
+regression test: it asserts from one stock release build that the promoted symbols are
+absent from the caller's object file and that the cold controls are still there. Measured
+basis in `PLAN.md` 4.2 and 4.16; the numbers say this reaches the same peak as library
+evolution plus package CMO and has no cliff when the optimiser declines.
 
 **The shipped Elisp is clean-room.** GNU's `subr.el`/`simple.el` are GPLv3: run them as an
 oracle with `emacs -Q --batch`, quote their output in tests, never copy or paraphrase their
@@ -144,9 +157,47 @@ One milestone at a time. Eight steps, each traceable to a Reticle incident:
    plus a targeted edit and bump the mtime, never `git checkout --`.
 6. **Main-conversation gate**: rerun `dev/gate.sh` yourself; do not trust a subagent's
    numbers.
-7. **Trailing re-review** if product code changed after step 4: give the reviewer only the
-   trailing diff and say which batches nobody has read. One round, no recursion; if the
-   trailing changes were test-only, record that instead.
+7. **Trailing re-review, repeated until the trailing diff is empty.** Nothing reaches a
+   commit without a cold read — there is no batch size, no "it was only tests" and no
+   round limit that exempts one.
+   - **The anchor is the git index, not your memory.** Immediately before handing a diff
+     to a reviewer, `git add -A`. The index then holds exactly the state that round read,
+     the next round's batch is exactly `git diff`, and both survive a session dying
+     mid-milestone (`git commit` moves `HEAD`, not the index or the working tree, so it
+     does not disturb the anchor either). Do not rely on a scratch file: the scratch
+     directory is per-session, so an interrupted milestone would lose the only record of
+     where the last review stopped. The one way to break this silently is to `git add`
+     for some unrelated reason while a round is pending — that moves files into
+     "already read" with nothing to detect it. While a round is out, stage nothing.
+   - If that diff is non-empty, hand it — only it, never the whole milestone — to a fresh
+     reviewer, saying which batch it is and what earlier rounds covered. If the batch
+     touched anything that compiles or runs — `Sources/`, `Tests/`, `lisp/`, `dev/` —
+     rerun step 6 first: a reviewer reading code that does not build wastes the round, and
+     a test file is code.
+   - Acting on the findings produces a new batch, reviewed the same way. **The loop
+     terminates because the variable is *changes made*, not *findings reported*.** A round
+     whose findings you record rather than act on ends it, and declining is a normal
+     outcome, not a failure: findings you decline go into the milestone record with the
+     reason. Say so in the task spec too — a reviewer told that "nothing to change" is the
+     thing that ends the loop will not manufacture a finding to look useful.
+   - **The base case, without which this rule cannot terminate.** Writing declined findings
+     into the record is itself an edit, so a literal reading would demand yet another round
+     for it, forever. It does not get one: **the record entry that transcribes a round's
+     declined findings is the loop's terminator, not a new batch.** It is allowed to say
+     only what that reviewer wrote and why you declined it; the moment it makes any new
+     claim about the code, it is a batch again and goes back through.
+   - Prose findings about the milestone record itself are the usual place this runs away.
+     Fix an incorrect *fact*; record a disagreement about *wording* and stop.
+   - **Do not proceed to step 8 while an unreviewed change exists.**<br>2026-09-06 (M0):
+     the old rule capped this at one round and told you to record the remainder as unread.
+     Four fixes then shipped uninspected, one of them a new body-length guard in
+     `dev/check-inlining.sh` — and that guard's first version was itself wrong (it averaged
+     the two probe bodies, so a mutation shortening only the hot one survived), caught only
+     because the main conversation happened to run a mutation against it, by no review. A
+     cap that exempts the last batch exempts exactly the code written in a hurry at the
+     end. Two further rounds, on batches of 46 and then 12 lines, each still found
+     something — including a wrong attribution in this very paragraph, which originally
+     blamed `dev/gate.sh` for a change that round 2 had in fact already read.
 8. **Two commits**: `M<NN>: <summary>` and `PLAN.md: M<NN> record`.
 
 ## Delegation discipline
