@@ -1354,10 +1354,122 @@ And test seams must be per-instance: two hooks added to `MainActorWatchdog` were
 written as statics, and because Swift Testing runs suites in parallel every other test's
 watchdog parked in them.
 
-**Known gaps carried forward.** No icon artwork exists, so the bundle carries none;
-`dev/make-app-bundle.sh` compiles `assets/icon/swiftemacs.icon` only if it appears, and the
-gap closes in M7 with the rest of the visual work. `versionString()` in `Sources/App` has
-no test target. Neither blocks anything.
+**Known gaps carried forward.** `versionString()` in `Sources/App` has no test target.
+Does not block anything.
+
+*Amended 2026-09-07:* the icon gap this section recorded is closed early, out of milestone
+order, at the owner's request; see the icon record below.
+
+---
+
+## Icon, 2026-09-07 (out of milestone order, at the owner's request)
+
+**The mark.** A lowercase lambda -- Emacs Lisp -- inside Lisp parentheses, its right leg
+swept into a tapered wing tip for Swift. Background gradient Swift orange `#ff7a33` to
+Emacs purple, brightened, `#9a6be6`. GNU Emacs 30.2's own icon is a purple family running
+`#211f46` to `#d3d2e8`, its body carried by `#7e55b3` and `#5b2a85`
+(`grep -oiE '#[0-9a-f]{6}' /opt/homebrew/Cellar/emacs-plus@30/30.2/share/emacs/30.2/etc/
+images/icons/hicolor/scalable/apps/emacs.svg | sort | uniq -c`); the stop shipped here is
+brighter than those two, and deliberately so. The *dark* appearance was first rendered at
+128 px with `#7c4dbe` -- the value `icon.json` carried at that point, recoverable only from
+this record -- and the lower half of the glyph was too dim to read,
+because Icon Composer's dark treatment darkens the background to near-black and moves the
+gradient onto the glyph -- so the darkest stop, which carries the most contrast against a
+light background, lands on the least against a dark one.
+
+**Files.** `assets/icon/swiftemacs.icon` is the Icon Composer package: hand-authored
+`icon.json` (two-group layering, so the parentheses and the glyph get separate glass,
+shadow and parallax) plus two generated layer SVGs. `dev/gen-icon.py` generates those and
+`assets/icon/swiftemacs-flat.svg`, a flat single file for docs and the web, reading the
+gradient back out of `icon.json` so the two cannot drift. `dev/make-app-bundle.sh` needed
+no change beyond its comments -- its conditional actool step was written in M0 for exactly
+this artwork and compiled it unmodified.
+
+**Why the geometry is generated.** actool takes only a subset of SVG and Reticle's
+`Reticle.icon` artwork is likewise fill-only, so every stroke has to ship as an explicit
+filled outline; hand-maintaining several hundred outline points is not on, a dozen
+centreline control points and a width profile is. Round terminals are emitted as arcs, and
+subpaths are normalised to counter-clockwise because the nonzero fill rule unions
+overlapping subpaths only when they wind the same way.
+
+**Three things the pixels decided, none of which reading the file would have.**
+
+1. The first draft ran the lambda's tail collinear with its right leg. At 256 px it read as
+   an "A". The tail is now its own, shallower stroke breaking about 30 degrees off the leg.
+2. The layers were first `"fill": "automatic"`, as Reticle's are. That renders the glyph as
+   dark glass on the gradient; `{"solid": "srgb:1,1,1,1"}` -- white -- is markedly bolder at
+   64 px, which is the size that decides whether a Dock icon works.
+3. The parentheses at half-width 26 with a shallow bulge read as straight sticks; 31 with a
+   deeper bulge reads as parentheses.
+
+**actool constraint, quoted.** A three-stop gradient makes actool throw
+`-[__NSPlaceholderArray initWithObjects:count:]: attempt to insert nil object` with the real
+cause printed above the backtrace: `Linear gradients require exactly 2 colors`. Recorded in
+`dev/make-app-bundle.sh` next to the actool invocation. A relative path to the `.icon`
+package also failed, with `The file "swiftemacs.icon" couldn't be opened because there is
+no such file` above a path that had the relative one appended to the package's own
+(`.../assets/icon/swiftemacs.icon/assets/icon/swiftemacs.icon`). That is the observation,
+not a mechanism: a cold reviewer could not reproduce it cleanly and left it unresolved. It
+does not reach the shipped code either way -- `ROOT` at `dev/make-app-bundle.sh:51` is
+absolute and `mktemp -d` returns absolute paths.
+
+**Verification.** Pixels, per the third oracle: `dev/make-app-bundle.sh` then the rendered
+bundle icon at 512, 128 and 48 px in the system's dark appearance, and actool's own `.icns`
+output at 256 and 64 px for the light one. The clearance between the lambda and the
+parentheses and the content bounding box are printed by `dev/gen-icon.py` (currently
+32.28 px and 67% x 68% of the canvas) rather than eyeballed. That distance is between
+vertices of the 240-sample outlines, so it is an upper bound on the true curve-to-curve
+distance and is named as one in the script. `dev/gate.sh` is unaffected -- nothing
+here compiles -- but was run.
+
+**Review.** One round, cold, on the staged diff. It found no correctness defect and seven
+smaller things; six were acted on and are in the trailing batch: the clearance metric
+subsampled 1-in-4 vertices, which can only overstate the margin, and now runs over every
+pair (0.19 s in total, and the number it prints is unchanged at two decimal places from the
+reviewer's independent full-resolution measurement); the ribbon's normal fell back to
+dividing by 1.0 at a degenerate central difference, yielding the zero vector and a pinched
+outline rather than a direction, and now carries the previous normal, seeded arbitrarily at
+the first sample (no centreline here comes close -- the smallest central difference across
+all five is 0.435); `ccw()`'s
+nonzero-union guarantee holds only while each ribbon is simple, now said in both
+docstrings; a three-stop `icon.json` failed with a bare `too many values to unpack` and now
+fails naming the actool limit, before anything is written; and the two PLAN.md claims
+amended above. Declined, with the reason, per the loop's terminating rule:
+
+- *Nothing checks that the checked-in SVGs are current with the generator, so a hand-edit
+  to `icon.json` or to a curve constant would silently drift them.* True, and the reviewer
+  confirmed there is no drift today by regenerating and diffing. Declined: the artwork is a
+  one-off asset, `dev/gate.sh` is the definition of done for code that compiles, and adding
+  an asset-freshness stage to it is a change to the project's gate that this task did not
+  ask for. The generator is deterministic and takes 0.19 s; re-running it is the check.
+
+Round 2 read that batch, 161 lines over `dev/gen-icon.py` and this file. It found one real
+defect and four smaller ones, all acted on. The real one: round 1's fix that was supposed
+to put the self-overlap caveat in the module docstring **never landed** -- the `replace`
+that carried it silently matched nothing, because the target text wrapped across lines
+differently than it had been typed, so `ccw()`'s docstring pointed at a caveat that did not
+exist and this record claimed it was "said in both docstrings" when it was said in one. The
+others: the newly-added `#7c4dbe` was as uncited as the claim round 1 had objected to;
+citing only `#7e55b3`, `#5b2a85` and `#a52ecb` was selective, since the same file carries
+lighter purples than the shipped stop, so "brighter than any of them" only survived on a
+narrow reading; "carries the last good normal" is wrong for a run of degenerate leading
+samples, which would carry the seed; and "five were acted on" undercounted six. Round 2
+also disclosed that it executed two of its own designed mutations rather than only
+designing them, in an rsync copy outside the repository -- its numbers for the first
+(32.27994 full-resolution against 32.43144 subsampled) reproduce what is printed here.
+
+Round 3 read that batch, 96 lines over the same two files, and reported nothing to change.
+It reproduced every number the record quotes, recomputed the offset-curve margin the new
+caveat asserts (radius of curvature minus half-width, worst case +124.6 on the tail), and
+noted one thing it decided not to flag: the `grep` line above wraps inside a Markdown code
+span, so a reader copying the *rendered* text gets a broken path -- it found the same
+pattern already at nine other places in this file and took it as the document's convention
+rather than something this change introduced. Declined here for that reason. This entry
+transcribes that round; it is the loop's terminator, not a new batch.
+
+**Not done.** No `.icns` or `.ico` is checked in (actool emits the `.icns` at build time,
+and there is no Windows target); there is no golden-image test over the icon, and no
+rendering of the tinted or clear appearances, which were taken on trust from the format.
 
 ---
 
