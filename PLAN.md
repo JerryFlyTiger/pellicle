@@ -1516,6 +1516,66 @@ cleared by a single 20,000-byte paste in ~98% of runs and so evidences an excurs
 than a traversal; it was kept and documented rather than re-tuned, because a bar picked until
 it barely passes is the defect this sub-milestone is about.
 
+#### M1.1b, designed and not started: the edit path
+
+The architecture review of 2026-09-07 compared four designs against the measured problem
+(one single-byte insert rebuilds ~400 nodes: 211 `concatNodes`, 296 `makeInterior`, 106
+`makeLeaf` at 1 MB). Recommendation, with the comparison behind it:
+
+| | keeps `B...2B` | 1 MB single-byte insert | verdict |
+|---|---|---|---|
+| relaxed invariant (xi-style) | no -- only an upper bound survives | ~10-15 us (est.) | **reject** |
+| `TreeBuilder` with per-height slots (Zed `sum_tree`) | yes | 13.7-16.5 us measured | the general path |
+| cursor `slice`/`push_tree` (Zed's edit path) | yes | as above; it *is* the builder plus a resumable stack | on top of it |
+| **path copy with local repair** | yes | **1.22-1.55 us measured** | **the fast path** |
+
+Reject the relaxed invariant specifically because pellicle has already *accidentally* built
+it: the current `concat`-everywhere rebuild is self-healing, which is exactly why a
+rebalancing mutation was invisible to the tests (finding 4 above). Making that permanent
+would delete the one oracle this project's discipline depends on. Path copy argues the other
+way -- it shares sibling subtrees verbatim and never re-folds neighbours, so a rebalancing
+defect it introduces *persists* and an end-of-run check catches it.
+
+New surface in `SumTree.swift`, from the review:
+
+```swift
+package enum Fragment<Item: Summable>: Sendable {   // transient; never stored
+    case items(ArraySlice<Item>)                        // 0...2B items, height 0
+    case nodes(ArraySlice<Node<Item>>, height: UInt8)   // 0...2B same-height nodes
+}
+package struct TreeBuilder<Item: Summable>: ~Copyable {
+    package mutating func push(_ fragment: Fragment<Item>)
+    package mutating func push(subtree: Node<Item>)     // well-formed; O(1) amortised
+    package consuming func finish() -> SumTree<Item>
+}
+package func splitFragments(where:left:right:) -> (item: Item, itemPrefix: Item.Item_Summary)?
+package func pathCopyEdit(where:_ edit: (Item, Item.Item_Summary) -> [Item]?) -> SumTree<Item>?
+```
+
+Deleted by it: `buildFromNodes` and both its call sites inside `splitNode`/`cutNode`, and
+`Rope.concatMergingSeam` -- four of `replaceSubrange`'s six cursor walks exist only to serve
+the seam policy, and done leaf-locally that policy is two array reads. `concatNodes`/`rewrap`
+become thin wrappers over `TreeBuilder.push`, so there is one rebalancing implementation
+rather than two.
+
+**`checkInvariants()` keeps its current assertions verbatim** -- that is the point of
+preferring this over the relaxed invariant, and `Fragment` being a distinct type is what
+makes an underfull node unrepresentable in a stored tree rather than merely discouraged.
+Add: a `Rope`-level assertion that no two *adjacent* chunks have byte counts summing to
+<= 64, which is the exact postcondition of the leaf-local coalescing policy and fails
+immediately when it breaks, unlike the statistical mean-fill guard it would replace.
+
+Order: (1) path copy, handling **both** overflow and underflow -- the prototype's own bug was
+underflow arriving from the coalescing policy, not from a deletion; (2) `Fragment` +
+`TreeBuilder`, replacing the fallback; (3) re-sweep `B` on the new implementation, with an
+iteration benchmark added, since the optimum can move once cost-per-level changes shape.
+Deletion's underflow repair (borrow-from-sibling or merge-with-sibling per level) is the hard
+half and is where review effort goes. Prototypes and their cautions:
+`dev/spikes/m1.1b-rope-edit-path/`.
+
+Target: single-scalar insert into a 1 MB rope **under 10 us**, asserted absolutely and not
+only as a ratio.
+
 **Known gaps.** `Rope(String)` for 1 MB takes ~11 ms (~91 MB/s) because `SumTree.build` halves
 recursively through `concat`; a 10 MB file would spend 110 ms in construction before anything
 else happens, so M1.2 wants a bottom-up bulk loader. No character/UTF-16/line conversion API
