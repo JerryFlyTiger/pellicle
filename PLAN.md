@@ -909,15 +909,22 @@ recorded oracle transcript or a measurement, never by reading code.
 ### Phase A: foundation (M0-M8)
 
 - **M0 Repository and gate.** SwiftPM package with the module layout of 4.2 (empty
-  targets), `-package-cmo` proven on one cross-module hot call, `dev/gate.sh` (`swift format
-  lint --strict`, `swift build`, `swift test`), `dev/ci.sh` (the gate plus golden images and
-  the short energy checks, run on this machine; there is no remote CI), `dev/make-app-
-  bundle.sh` (Info.plist, entitlements `allow-jit` + `disable-library-validation`, `.icon` +
-  `.icns` per Reticle M98, codesign with hardened runtime), a launch-time self-test that
+  targets), the cross-module hot call settled by benchmark, `dev/gate.sh` (`swift format
+  lint --strict`, `swift build`, `swift test`), `dev/ci.sh` (the gate, the inlining check,
+  the app bundle, the self-test and a codesign verify, run on this machine; there is no
+  remote CI), `dev/make-app-bundle.sh` (Info.plist, entitlements `allow-jit` +
+  `disable-library-validation`, `.icon` + `.icns` per Reticle M98, codesign with hardened
+  runtime), a launch-time self-test that
   exercises MAP_JIT and `dlopen`s a bundled test dylib, `MXMetricManager` subscription,
   `os_signpost` handles and the main-actor watchdog from day one, `CLAUDE.md`, `Tests` smoke
   test. Done when the gate is green, the `.app` launches an empty native window and the
   self-test passes under the hardened runtime.
+  *Amended 2026-09-07:* this entry used to say `-package-cmo` would be "proven on one
+  cross-module hot call" and that `dev/ci.sh` was "the gate plus golden images and the short
+  energy checks". M0 settled the first the other way -- the driver never forwards the flag,
+  and `public` + `@inlinable` reaches the same speed with none -- and built the second
+  without those two stages, neither of which has anything to run yet. Corrected in place
+  above rather than left standing beside this note; the record is in section 11.
 - **M1 Text.** Rope with summaries, snapshots, anchors, interval tree, transactions and undo
   checkpoints, line-indexed mmap view. Done when property tests against a naive string model
   pass over 1M random edits, complexity benchmarks match the table in 4.5, a 2 GB file opens
@@ -1168,7 +1175,7 @@ listed with its disposition; the accepted ones are already folded into the secti
 | 20 | ExtensionKit extensions are sandboxed and ship inside installed apps | accepted: tier 3 split into 3a/3b with the delivery constraint (4.9) |
 | 21 | Stability instrumentation lands six milestones after the owner is asked to daily-drive; soak durations disagree | accepted: MetricKit, signposts, watchdog in M0; 8 h routine / 24 h release (8, 4.14) |
 | 22 | Deferring the JIT changes requirement R5 without the owner's sign-off | accepted; the owner signed off on 2026-09-05 (8, M21) |
-| 23 | `package` access alone does not give cross-module optimisation | accepted: `-package-cmo` in M0 with a benchmark (4.2) |
+| 23 | `package` access alone does not give cross-module optimisation | accepted, then re-settled by the M0 benchmark: not `-package-cmo`, which the driver silently drops, but `public` + `@inlinable` on a small member, held by `dev/check-inlining.sh` (4.2, 11) |
 | 24 | Factual drift in "verified facts": report count, display, subr count, parser state count | accepted and corrected (2, 4.10, 5) |
 | 25 | Several DoDs unverifiable (design references, week-one demo, org tree equality, uninstalled servers) | accepted: reference-set capture, driver sessions, normalisation spec, install-and-probe steps (8) |
 | 26 | Missing: clipboard/drag-and-drop/Services, crash and auto-save recovery, session restore, spell check, CI, Reticle Elisp migration | accepted: M8b, `dev/ci.sh` in M0, migration inventory in Gate A (8) |
@@ -1627,6 +1634,44 @@ bundle's icon as macOS renders it at 512 and 48 px in the system's dark appearan
 `ictool` lives inside `Icon Composer.app/Contents/Executables/` and is what `actool` shells
 out to for a `.icon` package; it is a far better pixel oracle than assembling a bundle, and
 it is what the next person should reach for.
+
+---
+
+## Documentation sweep, 2026-09-07
+
+The owner's rule, in their words: an error you do not fix now is one you forget, and it
+stays. So every repository path `CLAUDE.md` names was extracted and checked against the
+tree, and the plan sections were checked against their own M0 record. Eight things were
+wrong and are fixed:
+
+- **Three tools `CLAUDE.md` tells you to run do not exist here**: `dev/lsp-probe.py` (which
+  it even described as "ported from Reticle"), `dev/gui-drive.sh`, and `dev/mutate.py`,
+  which a fixed clause for task specs also named. All three are in `~/My_Projects/reticle/
+  dev/`; none has been ported. `CLAUDE.md` now says so, names the file to port and the
+  milestone that needs it, and describes mutation the way M0 actually did it -- by hand,
+  with a file backup, a targeted edit and `touch`.
+- **`xcodebuild` is invoked by no script here**, though `CLAUDE.md` said it was used by
+  `dev/make-app-bundle.sh`. That script calls `actool` and nothing else from Xcode. This
+  one had already propagated into `README.md` by being copied from `CLAUDE.md`.
+- **Two plan entries were contradicted by their own M0 record** and had been standing next
+  to it since: the M0 milestone's "`-package-cmo` proven on one cross-module hot call" and
+  "`dev/ci.sh` (the gate plus golden images and the short energy checks)", and decision-log
+  row 23's resolution. Corrected in place with an `*Amended*` note.
+- `README.md`'s dependency rule said "a dependency" where `CLAUDE.md` says "a SwiftPM
+  dependency".
+
+Two cold rounds. The first cleared seven of the eight but found the amendment on the M0
+entry had been wedged into the middle of the bullet, leaving the false text standing a few
+lines below it -- so the entry contradicted itself, while the same batch fixed the same
+fact by direct rewrite in the risk table. It also found "M6 or M7" for `gui-drive.sh` was a
+guess where the sibling fix stated M10 from the plan. Both fixed; the second round found
+nothing to change and declined to file its one observation (that `dev/ci.sh`'s parenthetical
+now overlaps the bullet's own fuller mentions, which the bullet already did before). This
+entry transcribes that round; it is the loop's terminator, not a new batch.
+
+Left alone deliberately: `lisp/`, `Sources/Lisp/Builtins/` and `Tests/CanvasTests/Golden/`
+are named by `CLAUDE.md` as conventions for where things go when they exist, not as things
+to run, and their milestones have not happened.
 
 ---
 
