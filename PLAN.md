@@ -822,6 +822,31 @@ friends are GPLv3 and are used **only as a behavioural oracle** through `emacs -
 never as source to derive from. File names avoid GNU's. This is a decision, recorded here
 because a Developer-ID-distributed app's licence depends on it.
 
+*Settled 2026-09-07, by the owner:* the project ships under **FSL-1.1-ALv2**, the
+Functional Source License 1.1 with an Apache 2.0 future grant -- the same licence Reticle
+uses, `LICENSE.md` at the repository root, byte-identical to fsl.software's template but
+for the copyright line. The clean-room rule above -- which predates this decision -- is
+what left the choice open: GPLv3 is copyleft, so anything derived from GNU's files would
+have had to ship as GPLv3 itself. Not, as this paragraph first said, because Apache 2.0 is
+incompatible with GPLv3; a cold reviewer fetched the FSF's licence list and it says the
+opposite, that Apache 2.0 *is* compatible with GPLv3 and it is GPLv2 that conflicts. The
+error was in the README too. Nothing else in the tree is third-party today, so there is no
+`THIRD_PARTY_LICENSES.md` counterpart to Reticle's; the rule in `CLAUDE.md` that adding a
+SwiftPM dependency is a milestone decision recorded with its licence is what keeps that
+true.
+
+*Round 2 of the cold read on that correction found nothing to change.* It re-fetched the
+FSF list and got the same answer, checked the Competing Use summary against `LICENSE.md`,
+and dated the clean-room rule to the initial commit (2026-09-05) against this decision
+(2026-09-07), two days apart. Its three remaining notes are recorded rather than acted on,
+all of them precision rather than fact, and it said it would not block on any: that GNU's
+headers read "version 3 ... or (at your option) any later version", so "would have had to
+ship as GPLv3 itself" is a simplification; that the one-line Competing Use summary drops
+the clause's "making the Software available to others", which cannot mislead because
+non-distribution cannot infringe; and that `README.md`'s design note says "a dependency"
+where this paragraph now says "a SwiftPM dependency" -- a line that neither round touched.
+This entry transcribes that round; it is the loop's terminator, not a new batch.
+
 **Native builtins.** About 150 primitives are native Swift at first (the engine report lists
 them by group: cons/list, predicates, arithmetic, symbols/eval, strings, vectors/sequences,
 hash tables, buffers and editing, buffer-locals, text properties and overlays, markers,
@@ -1592,6 +1617,10 @@ paragraph says round 3 "reproduced all four of its claims, including the purple 
 `#936ddf`", while round 2's paragraph frames that same check as going one step further than
 the four it lists, so whether the purple stop is the fourth or a fifth is ambiguous on a
 cold read. This entry transcribes that round; it is the loop's terminator, not a new batch.
+
+**The README's image**, `assets/icon/swiftemacs-256.png`, is a render, not artwork:
+`ictool ... --rendition Default --width 256 --height 256 --scale 1` against the package.
+`dev/gen-icon.py` does not produce it; regenerate it with that command if the mark changes.
 
 **Verification.** All six macOS renditions through `ictool --export-image`, plus the signed
 bundle's icon as macOS renders it at 512 and 48 px in the system's dark appearance.
