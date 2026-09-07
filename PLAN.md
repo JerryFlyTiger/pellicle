@@ -1744,6 +1744,53 @@ groups the two research reports' path citations as one item, so it reads as four
 where another reading would say three files. This entry transcribes that round; it is the
 loop's terminator, not a new batch.
 
+**The sweep afterwards, and what it covered**, so nobody has to redo it wondering whether
+the rename was complete. A cold read refuted the first version of this paragraph,
+finding six things wrong with it, which is recorded here because the errors were of the
+kind a sweep is most likely to make -- undercounting what it found and overstating how
+clean the result was.
+
+- **Tracked files**: fourteen `swiftemacs` remain, each on the historical side of the rule
+  above. **Three** of them are references to the old *directory*, not one as this paragraph
+  first said: the planning brief's scratch-path guard and two research reports' citations of
+  scratchpad paths. That count was already stated correctly earlier in this section, and
+  the first version contradicted it.
+- **Case variants**: one `SwiftEmacs` and one `SWIFTEMACS`, both inside this record
+  describing what was replaced.
+- **Untracked and ignored files**: `.build`, which is regenerated, and a root `.DS_Store`,
+  which `strings` shows carries nothing. Nothing else.
+- **Binary files**, read with `strings`: clean, the icon PNG included.
+- **`.git/config`**: the remote points at the renamed repository, and GitHub 301-redirects
+  the old URL.
+- **Outside the repository**: `~/.claude`'s `settings.json`, agent definitions and hooks
+  name nothing from this project. The global `CLAUDE.md` does still say `swiftemacs` once,
+  in a dated note -- "2026-09-06 實測（swiftemacs M0）" -- which is a dated observation and
+  stays by the same rule; the first version of this paragraph said only that no *path*
+  survived there, which was true but read as more than it meant.
+- **The per-project memory directory** exists under the new name with its five files, and
+  there is no memory directory left under the old name -- it moved whole. What does still
+  exist under the old name is the *session* directory beside it: this session keeps the
+  identity it started with, so its transcript goes on being written there.
+- **macOS's Launch Services database** held six distinct bundle registrations for
+  `app.swiftemacs` (24 string hits, four per record -- the first version reported the raw
+  grep count as though it were the number of entries). Five of them were throwaway `.app`
+  copies this session left in its scratchpad while investigating the dark appearance, and
+  they still existed, so "its paths no longer exist" was false for the majority. They have
+  been unregistered and deleted. One registration remains, for
+  `.build/swiftemacs.app`, whose path is genuinely gone; that entry is an OS cache outside
+  this repository and prunes itself, and rebuilding the whole database for it would be a
+  machine-wide operation for something that disappears on its own.
+
+*Round 3 found nothing to change.* It re-derived the six from the two patches, placed the
+earlier statement of the count, checked that no memory directory survives under the old
+name while the session directory beside it does, and re-ran the counts this batch did not
+touch to see whether the edits had invalidated a neighbour -- they had not. Its one
+observation is recorded and not acted on: the sentence above calls the first version's
+errors "undercounting what it found and overstating how clean the result was", and one of
+the six fits neither, since reporting a raw `grep -c` of 24 as an entry count inflated the
+mess rather than hid it. That is a characterisation, not a claim about the machine. This
+entry transcribes that round; it is the loop's terminator, not a new batch.
+
 **Not settled here.** Whether a mark is confusingly similar is a lawyer's judgement and not
 one this record can make. What it can record is that the specific, documented conflict --
 an Apple registered mark used as part of a product name in Apple's own field -- is gone.
