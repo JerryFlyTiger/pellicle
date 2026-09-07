@@ -10,11 +10,8 @@
     {
       "layers": [
         {
-          "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
-          },
-          "image-name": "parens.svg",
-          "name": "Parens",
+          "image-name": "whole.svg",
+          "name": "Mark",
           "position": {
             "scale": 1.0,
             "translation-in-points": [
@@ -25,38 +22,12 @@
         }
       ],
       "shadow": {
-        "kind": "neutral",
-        "opacity": 0.35
+        "kind": "none",
+        "opacity": 0.0
       },
       "translucency": {
-        "enabled": true,
-        "value": 0.65
-      }
-    },
-    {
-      "layers": [
-        {
-          "fill": {
-            "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
-          },
-          "image-name": "lambda.svg",
-          "name": "Lambda",
-          "position": {
-            "scale": 1.0,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        }
-      ],
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.5
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.5
+        "enabled": false,
+        "value": 0.0
       }
     }
   ],

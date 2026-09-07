@@ -5,9 +5,8 @@
 
 Writes, relative to the repository root:
 
-    assets/icon/swiftemacs.icon/Assets/lambda.svg   layer 2 (front), the glyph
-    assets/icon/swiftemacs.icon/Assets/parens.svg   layer 1 (back), the frame
-    assets/icon/swiftemacs-flat.svg                 one flat file for docs/web
+    assets/icon/swiftemacs.icon/Assets/whole.svg   the icon's single layer
+    assets/icon/swiftemacs-flat.svg                one flat file for docs/web
 
 `assets/icon/swiftemacs.icon/icon.json` is *not* generated: it is the Icon
 Composer document proper (gradient, per-group glass and shadow), hand-authored
@@ -17,6 +16,41 @@ and read back here so the flat file cannot drift from the real icon's colours.
 The mark: a lowercase lambda -- Emacs Lisp -- inside Lisp parentheses, its
 right leg swept into a tapered wing tip for Swift. The gradient runs Swift
 orange to Emacs purple.
+
+Why the whole mark is one flat layer, and not the layered glass composition it
+started as. The owner asked for the orange background in dark mode too. Icon
+Composer 1.6 (Xcode 26.6) does not allow that to be authored:
+
+  - The document `fill` is replaced, in the dark appearance, by a fixed neutral
+    dark grey -- gray-gamma-22 white 0.192 to 0.078, read out of
+    `ictool --export-intermediate-representation`, not derived from the authored
+    colours at all.
+  - This version has no per-appearance override. Its icon.json decoder reads
+    only `fill`, `groups`, `supported-platforms`,
+    `color-space-for-untagged-svg-colors`, `features`, `languages` and
+    `implicit-asset-mirroring` at the top level; `fill-specializations`, which
+    later versions use, is silently ignored by both ictool and actool. That is
+    measured, not assumed: giving each candidate key a garbage string shows
+    which ones make the decoder throw, and this one never does.
+  - Painting the gradient into a *layer* does survive into the dark appearance.
+    But any layer that is not the only one is composited as glass there, at a
+    fill opacity low enough that a white glyph over a bright background washes
+    out -- at 48 px, the Dock size, the mark was gone. Nothing fixes that:
+    translucency off moves at most 18/255, blend modes and `lighting` move
+    nothing, `glass: false` makes it worse, and it happens whether the glyph
+    takes its colour from the layer `fill` or from its own SVG.
+
+So the icon is one layer that already contains everything, which the dark
+appearance leaves alone. The cost is the per-layer parallax and specular; the
+alternative was an icon whose glyph vanished in the Dock.
+
+Colours in that layer have to be written in **Display P3**:
+`color-space-for-untagged-svg-colors` accepts no value but `display-p3` (every
+other spelling is rejected outright), so untagged SVG hex is read as P3, and
+writing sRGB hex there shifted the render by up to 64/255. The document `fill`
+stays set to the sRGB gradient -- it is the one place the colours are authored,
+it is what the flat file uses as-is, and it is what shows if the layer is ever
+dropped -- and the P3 values below are converted from it.
 
 Why the geometry is generated rather than drawn by hand in an editor: actool
 accepts only a subset of SVG (Reticle.icon's artwork, read as prior art, is
@@ -150,6 +184,11 @@ def compose(*fns):
     return apply
 
 
+def canvas_rect(side=1024.0):
+    """The background layer: the whole canvas, which the icon shape then masks."""
+    return [(0.0, 0.0), (side, 0.0), (side, side), (0.0, side)]
+
+
 def squircle(side=1024.0, n=5.5, steps=400):
     """Superellipse standing in for the macOS icon mask in the flat file only."""
     a = side / 2.0
@@ -214,9 +253,37 @@ def write(path, body):
 
 
 def hex_of(fill):
-    """'srgb:r,g,b,a' as authored in icon.json -> '#rrggbb'."""
+    """'srgb:r,g,b,a' as authored in icon.json -> '#rrggbb' (still sRGB)."""
     r, g, b, _a = (float(v) for v in fill.split(":", 1)[1].split(","))
     return "#%02x%02x%02x" % tuple(min(255, max(0, round(c * 255))) for c in (r, g, b))
+
+
+# sRGB and Display P3 share a transfer function and a white point (D65) and
+# differ only in primaries, so the conversion is decode, one 3x3, re-encode.
+# Both matrices are the standard D65 ones; the product is applied directly.
+SRGB_TO_XYZ = ((0.4123907993, 0.3575843394, 0.1804807884),
+               (0.2126390059, 0.7151686788, 0.0721923154),
+               (0.0193308187, 0.1191947798, 0.9505321522))
+XYZ_TO_P3 = ((2.4934969119, -0.9313836179, -0.4027107845),
+             (-0.8294889696, 1.7626640603, 0.0236246858),
+             (0.0358458302, -0.0761723893, 0.9568845240))
+
+
+def _decode(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _encode(c):
+    c = min(1.0, max(0.0, c))
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def p3_hex_of(fill):
+    """'srgb:r,g,b,a' -> '#rrggbb' in Display P3, for untagged SVG colours."""
+    lin = [_decode(float(v)) for v in fill.split(":", 1)[1].split(",")[:3]]
+    xyz = [sum(m * c for m, c in zip(row, lin)) for row in SRGB_TO_XYZ]
+    p3 = [sum(m * c for m, c in zip(row, xyz)) for row in XYZ_TO_P3]
+    return "#%02x%02x%02x" % tuple(round(_encode(c) * 255) for c in p3)
 
 
 with open(os.path.join(ICONPKG, "icon.json")) as f:
@@ -229,22 +296,37 @@ if len(stops) != 2:
                      % len(stops))
 top, bottom = (hex_of(s) for s in stops)
 
-assets = os.path.join(ICONPKG, "Assets")
-write(os.path.join(assets, "lambda.svg"),
-      '  <path fill-rule="nonzero" d="%s"/>' % path_data(lam))
-write(os.path.join(assets, "parens.svg"),
-      '  <path fill-rule="nonzero" d="%s"/>' % path_data(par))
-
-write(os.path.join(ROOT, "assets", "icon", "swiftemacs-flat.svg"), """  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+BODY = """  <defs>
+    <linearGradient id="bg" %s>
       <stop offset="0" stop-color="%s"/>
       <stop offset="1" stop-color="%s"/>
     </linearGradient>
   </defs>
   <path fill="url(#bg)" d="%s"/>
   <path fill="#ffffff" fill-opacity="0.82" fill-rule="nonzero" d="%s"/>
-  <path fill="#ffffff" fill-rule="nonzero" d="%s"/>""" % (
-    top, bottom, path_data([squircle()]), path_data(par), path_data(lam)))
+  <path fill="#ffffff" fill-rule="nonzero" d="%s"/>"""
+
+# The macOS icon shape is the middle 80% of the canvas, and the document `fill`
+# runs its gradient across the shape, not across the canvas. A layer's own
+# gradient runs across the canvas, so pinning it to the shape's box is what
+# makes the two agree; measured by rendering a black-to-white ramp both ways at
+# 512 px and reading the rows (fill: 0.1874/0.4998/0.8120 at y=128/256/384, i.e.
+# a span of exactly 512*0.8 centred; layer: 0.2496/0.4998/0.7495, exactly 512).
+# Outside the stops the gradient pads, which is right: that area is masked off.
+SHAPE_INSET = 0.10
+SPAN = ('gradientUnits="userSpaceOnUse" x1="0" y1="%.1f" x2="0" y2="%.1f"'
+        % (1024 * SHAPE_INSET, 1024 * (1 - SHAPE_INSET)))
+
+# The icon package's single layer. It paints the bare canvas rather than a
+# squircle, because the icon shape masks it; the flat file below draws its own,
+# because nothing masks that, and its gradient spans that squircle.
+write(os.path.join(ICONPKG, "Assets", "whole.svg"),
+      BODY % (SPAN, p3_hex_of(stops[0]), p3_hex_of(stops[1]),
+              path_data([canvas_rect()]), path_data(par), path_data(lam)))
+
+write(os.path.join(ROOT, "assets", "icon", "swiftemacs-flat.svg"),
+      BODY % ('x1="0" y1="0" x2="0" y2="1"', top, bottom,
+              path_data([squircle()]), path_data(par), path_data(lam)))
 
 
 # The two measurements this file exists to keep honest.
