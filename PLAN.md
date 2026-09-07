@@ -1797,6 +1797,109 @@ an Apple registered mark used as part of a product name in Apple's own field -- 
 
 ---
 
+## Swift formatting, 2026-09-07
+
+`dev/gate.sh` lints `Sources` and `Tests` with `swift format lint --strict` on every run,
+so those cannot drift and running the formatter over them changed nothing. Six Swift files
+sit outside that: `Package.swift` and `dev/gui-shot.swift`, both already clean, and the four
+`dev/spikes/spike_*.swift`, which had never been linted. Those four are now formatted.
+
+**The formatter is Apple's `swift format` (6.3.0), not Nick Lockwood's SwiftFormat**, which
+is a different tool with different rules and is not installed here. Running that one instead
+would likely produce code the gate then rejects.
+
+**The spikes changed more than whitespace.** Five rules did it, and each preserves meaning:
+`DoNotUseSemicolons`, `UseLetInEveryBoundCaseVariable` (`case let .cons(car, cdr)` becoming
+`case .cons(let car, let cdr)`), `OneVariableDeclarationPerLine`, `OneCasePerLine` (one
+`case a, b, c` split per enum) and `OrderedImports`. Four more are whitespace only:
+`Indentation`, `LineLength`, `AddLines`, `Spacing`. All four files still pass
+`swiftc -typecheck` before and after, and `RESULTS.md` cites no line numbers into them, so
+the measurements it records stand -- taken, it should be said, against the pre-format text.
+
+**This paragraph used to quote a hit count per rule. It does not any more, and that is the
+most useful thing in this section.** Three cold rounds each found the counts wrong, in a
+different way every time. The first version named two rules because it read the diff instead
+of listing them. The second listed them, but against copies in a `mktemp` directory --
+`swift format` finds `.swift-format` by walking up from the *file* it is linting, so a copy
+outside the tree silently gets the tool's defaults, and three of the four whitespace rules
+change count between two-space and four-space indent. The third deduplicated nothing:
+`swift format lint` emits the same diagnostic repeatedly for `DoNotUseSemicolons` and
+`UseLetInEveryBoundCaseVariable`, so a raw `grep -c` reports 189 and 44 where the distinct
+sites are 55 and 37. Nothing depended on any of those numbers. A count in a record that no
+decision rests on is not evidence, it is a standing opportunity to be wrong -- which rules
+fired, and that each is meaning-preserving, is the whole of what a reader needs. The two
+lessons that generalise are worth more than the counts were: lint a scratch copy with
+`--configuration` or you are measuring a different codebase, and de-duplicate before
+counting anything this tool prints.
+
+**What the formatter did not fix**: fifteen `AlwaysUseLowerCamelCase` diagnostics and one
+`NoBlockComments`, none of which it auto-applies. `spike_interp.swift` has twelve -- ten
+constants, the function `L`, and the block comment, so they are not all naming;
+`spike_repr.swift` has three constants and `spike_jit.swift` one function.
+
+**And the reason first given for leaving `sys_icache_invalidate` alone was wrong.** This
+record said renaming it would break the file. It would not: the binding is the string in
+`@_silgen_name("sys_icache_invalidate")`, not the Swift identifier, so renaming the function
+while leaving the string typechecks -- checked, after a cold reviewer refuted the claim. The
+real reason is the general one, that `swift format`'s naming rules are lint-only and it
+performs no cross-reference rename. Left standing here because a wrong specific reason is
+worse than none: it would talk a future reader out of a cleanup that is actually safe.
+
+**Nothing in the test suite would notice** if an edit to a spike changed its behaviour. They
+are standalone scripts outside `Package.swift`'s targets and outside `swift test`'s reach.
+That is a gap, stated rather than papered over.
+
+Extending the gate to cover these four was **not attempted**, and this record deliberately
+does not prescribe how. Two earlier versions of this paragraph did, and cold reads refuted
+both: the first said `swift format` has no path-scoped configuration, when a nested
+`.swift-format` does govern the files beneath it; the second recommended that route and
+understated it badly. What is measured, and all this record should claim:
+
+- A nested `.swift-format` **replaces** the parent, it does not merge. It therefore drops
+  back to the tool's default indent width unless it restates it, which instantly conflicts
+  with files formatted to this project's four spaces.
+- Worse, and silently: the moment a configuration declares any `rules` key at all, **every
+  rule it does not list is off**. A nested file disabling two rules disables the rest too --
+  `DoNotUseSemicolons` goes from firing to not firing with no diagnostic to say so. The root
+  `.swift-format` here declares no `rules` key, so it gets the tool's defaults; a child
+  cannot partially override that.
+- The alternative is `// swift-format-ignore: RuleName`. **Do not reason about its scope
+  from anything written here or anywhere else -- measure it.** Five attempts in this record
+  to state how it scopes were each refuted by the next cold read: that it does not attach to
+  statements, that it does, that declarations and statements differ, a false aside about
+  these files being top-level scripts, and that the reach follows the rule rather than the
+  position. Three observations survive, and they are observations, not a rule -- both the
+  rule named and where the comment sits change the answer, and they interact differently for
+  each rule:
+    - `AlwaysUseLowerCamelCase`, comment above a declaration: silences that declaration
+      only, whether or not it is the first thing in its block.
+    - `NoBlockComments`, comment above the block comment: silences it, wherever in the block
+      it sits.
+    - `OneVariableDeclarationPerLine`, comment above the block's *first* statement: silences
+      every such declaration in the block. Put one ordinary statement before it and the
+      comment silences nothing at all, not even the line directly beneath it.
+
+  So check both directions after using one: that the diagnostic you meant to silence is
+  gone, and that the ones you did not mean to silence still fire.
+
+Whoever does it should derive the recipe themselves against the tool and test that the
+gate is still enforcing what it enforced before. Nothing edits a finished spike, so there
+is no hurry.
+
+**This section cost eleven cold-read rounds, and that is the record's most useful line.**
+Every round found something real, so the loop was not spinning; what kept failing was the
+writing. Nine of the eleven were spent on two things nobody needed: per-rule hit counts, and
+an explanation of a mechanism for work that was never done. Each was fixed by deleting it
+rather than by getting it right on the next try. The general form, for whoever writes the
+next record: *a claim that no decision depends on is not evidence, it is a standing
+opportunity to be wrong* -- and a mechanism you have not built is exactly that kind of
+claim. The final round found nothing to change; its predecessor's one open item, that "do
+not reason about its scope from anything written here" sits oddly beside three scope
+observations, is recorded and not acted on -- the sentence after it already says they are
+observations and not a rule.
+
+---
+
 ## Handover: state after M0, 2026-09-06
 
 - `git init` done; two commits per milestone as `CLAUDE.md` prescribes. M0 is built and its
