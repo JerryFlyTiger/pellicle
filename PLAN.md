@@ -1406,11 +1406,12 @@ overlapping subpaths only when they wind the same way.
 `-[__NSPlaceholderArray initWithObjects:count:]: attempt to insert nil object` with the real
 cause printed above the backtrace: `Linear gradients require exactly 2 colors`. Recorded in
 `dev/make-app-bundle.sh` next to the actool invocation. A relative path to the `.icon`
-package also failed, with `The file "swiftemacs.icon" couldn't be opened because there is
+package also failed, with `The file “swiftemacs.icon” couldn’t be opened because there is
 no such file` above a path that had the relative one appended to the package's own
 (`.../assets/icon/swiftemacs.icon/assets/icon/swiftemacs.icon`). That is the observation,
-not a mechanism: a cold reviewer could not reproduce it cleanly and left it unresolved. It
-does not reach the shipped code either way -- `ROOT` at `dev/make-app-bundle.sh:51` is
+not a mechanism: a cold reviewer could not reproduce it cleanly and left it unresolved, and
+neither could a later attempt from inside the package directory, which compiled normally.
+It does not reach the shipped code either way -- `ROOT` at `dev/make-app-bundle.sh:51` is
 absolute and `mktemp -d` returns absolute paths.
 
 **Verification.** Pixels, per the third oracle: `dev/make-app-bundle.sh` then the rendered
@@ -1419,8 +1420,18 @@ output at 256 and 64 px for the light one. The clearance between the lambda and 
 parentheses and the content bounding box are printed by `dev/gen-icon.py` (currently
 32.28 px and 67% x 68% of the canvas) rather than eyeballed. That distance is between
 vertices of the 240-sample outlines, so it is an upper bound on the true curve-to-curve
-distance and is named as one in the script. `dev/gate.sh` is unaffected -- nothing
-here compiles -- but was run.
+distance and is named as one in the script. `dev/gate.sh` is unaffected -- nothing here
+compiles -- but was run.
+
+**Not done.** No `.icns` or `.ico` is checked in (actool emits the `.icns` at build time,
+and there is no Windows target), and there is no golden-image test over the icon: nothing
+in `dev/gate.sh` would notice if the artwork changed. The renditions are checked by hand,
+by rendering them.
+
+*Amended 2026-09-07 by the dark-appearance record below.* This paragraph was moved here
+from the end of this section and reworded; it used to end "and no rendering of the tinted
+or clear appearances, which were taken on trust from the format", and that had stopped
+being true.
 
 **Review.** One round, cold, on the staged diff. It found no correctness defect and seven
 smaller things; six were acted on and are in the trailing batch: the clearance metric
@@ -1467,9 +1478,126 @@ pattern already at nine other places in this file and took it as the document's 
 rather than something this change introduced. Declined here for that reason. This entry
 transcribes that round; it is the loop's terminator, not a new batch.
 
-**Not done.** No `.icns` or `.ico` is checked in (actool emits the `.icns` at build time,
-and there is no Windows target); there is no golden-image test over the icon, and no
-rendering of the tinted or clear appearances, which were taken on trust from the format.
+---
+
+## Icon, dark appearance, 2026-09-07
+
+The owner opened the icon in the Dock, saw the dark appearance -- near-black background,
+gradient glyph -- and said they preferred the orange one. This makes the icon render the
+same in both appearances, and supersedes three statements in the record above: the package
+is no longer two groups with separate glass and parallax, it no longer has `lambda.svg` and
+`parens.svg` as separate layers, and the layers no longer carry a white `fill`.
+
+**What Icon Composer 1.6 (Xcode 26.6) does not let you author.** The dark appearance's
+background is not derived from the authored colours at all: it is a fixed neutral ramp,
+gray-gamma-22 white 0.192 to 0.078, which `ictool --export-intermediate-representation`
+shows as its own `Gradient-2` in the emitted `.xcassets`. There is no per-appearance
+override in this version. The `fill-specializations` key that later versions use appears in
+`IconComposerFoundation`'s strings but is not read: giving each candidate key a garbage
+string and seeing which ones make the decoder throw shows the top level reads only `fill`,
+`groups`, `supported-platforms`, `color-space-for-untagged-svg-colors`, `features`,
+`languages` and `implicit-asset-mirroring`. Under `ictool`, `groups: "GARBAGE-STRING"`
+fails with *The data couldn’t be read because it isn’t in the correct format* while
+`fill-specializations: "GARBAGE-STRING"` renders normally; under `actool --compile` on a
+copy of the package, the same two give `rc=1`, no `Assets.car`, *Exception while running
+actool: -[__NSPlaceholderArray initWithObjects:count:]: attempt to insert nil object* and
+`rc=0` with an `Assets.car`. Every `features` value tried was rejected as being from a
+newer version. Two cold reviewers reproduced the `ictool` half exactly and neither could
+test the `actool` half at all: in both environments `actool` exited 0 and emitted nothing,
+with no diagnostic, for all three variants including the unmodified control. Whatever that
+is, it is not the package. Re-run before relying on the `actool` half.
+
+**What does survive into the dark appearance is a layer's own artwork** -- but only if it is
+the *only* layer. Any layer beyond one is composited as glass there, at a fill opacity low
+enough that a white glyph over a bright background disappears; at 48 px, the Dock size, the
+mark was gone. That is measured against the alternatives, all rendered at 220 px and
+compared to the unchanged version: translucency off moves 18/255 at most, `blend-mode` and
+`lighting` move nothing at all, `glass: false` makes it worse (87/255, and visibly thinner),
+a duplicated layer stack moves 12/255, a stronger or layer-coloured shadow 12 and 50. Only
+the fill colour moves it (199/255) -- a dark glyph reads, a white one does not -- and that
+is not the mark the owner picked. It also makes no difference whether the colour comes from
+the layer `fill` or from the SVG's own paint.
+
+**So the icon is one layer containing everything**, `Assets/whole.svg`, which the dark
+appearance leaves alone. Default and Dark now differ by a mean of 0.94/255 (max 44 on 7.9%
+of pixels, the icon-level specular). The cost is the per-layer parallax and specular the
+first record described; the alternative was an icon whose glyph vanished in the Dock. The
+tinted and clear renditions still work -- they were rendered and checked, not assumed.
+
+**Two things this needed that only pixels could have told us.**
+
+1. *Colour space.* `color-space-for-untagged-svg-colors` accepts no value but `display-p3`
+   (`srgb`, `sRGB`, `s-rgb`, `extended-srgb`, `p3`, `auto` and five more are all rejected
+   outright), so untagged SVG hex is Display P3 and writing sRGB hex there shifted the
+   render by up to 64/255. A flat-colour probe settles the direction exactly: a document
+   fill of `srgb:#ff7a33` renders as P3 `#ee8246`, while an SVG `#ff7a33` renders as
+   `#ff7a33`. `dev/gen-icon.py` therefore converts, and the document `fill` stays the sRGB
+   authoring source for both it and the flat file. Its conversion gives `#ee8146`, one
+   step of green off what Icon Composer renders for the tagged fill; a cold reviewer
+   cross-checked the matrices against macOS ColorSync (`sips -m "Display P3.icc"`) and got
+   the generator's value, so the odd one out is Icon Composer's own rounding. It is the
+   whole of the 1/255 quoted below.
+2. *Gradient span.* The document `fill` runs its gradient across the icon *shape*; a layer's
+   own gradient runs across the *canvas*, and the macOS shape is the middle 80% of it. A
+   black-to-white ramp rendered both ways at 512 px reads 0.1874/0.4998/0.8120 at
+   y=128/256/384 for the fill and 0.2496/0.4998/0.7495 for the layer -- spans of exactly
+   512*0.8 and 512. The layer's gradient is pinned to the shape's box with
+   `gradientUnits="userSpaceOnUse"`, after which the background matches the previous
+   version to 1/255 at both ends.
+
+**Review.** One round, cold. No correctness defect in the code. It reproduced independently
+the two decoder probes, the `display-p3` rejections (adding that even `display-P3` and
+`DisplayP3` are rejected -- only the exact spelling works), the fixed dark ramp's 0.192 and
+0.078, the shape's 80% span, the Default-to-Dark statistics, and the matrices; the three
+amendments above are its three findings. What it did not reach, and this is a real gap in
+the record's support: the rejected-alternative measurements that justify the single-layer
+design (translucency 18/255, `glass: false` 87/255, and the rest) were each a separate
+`icon.json` variant and it did not rebuild them, so they rest on the main conversation's
+runs alone. It also flagged that every mutation it could design for this change is
+invisible to `dev/gate.sh` -- there is no test anywhere under `Tests/` that references the
+icon -- which the "Not done" note above already says.
+
+Round 2 read the amendments and found no incorrect fact in their technical claims, though
+two in their bookkeeping, below; it reproduced the `ictool`
+probes, `p3_hex_of()`'s output, the ColorSync cross-check, and the `display-P3`/`DisplayP3`
+rejections, and went one step further than the text by rendering the *purple* stop's tagged
+fill too -- `#936ddf`, an exact match to the generator, so the top stop's single step of
+green really is the whole residual. It hit the same `actool` wall as round 1, which is why
+the paragraph above now says two reviewers did. Its two findings were about this record and
+are fixed here: the `*Amended*` marker said the paragraph it marks had been "rewritten in
+place" when it had been moved, and it had been wedged mid-paragraph, taking a sentence of
+**Verification** with it; and the `ictool` message was quoted with straight apostrophes
+where the tool prints curly ones, which in a file whose rule is that oracle output is
+quoted so the next reader can check it is worth getting right.
+
+Round 3 found no incorrect fact in that batch and reproduced all four of its claims,
+including the purple stop's `#936ddf` by both routes. Two of its three remaining notes are
+recorded rather than acted on. Its methodology caveat: Icon Composer lays a faint grain
+over even a flat fill, so a *single-pixel* sample of that purple probe reads `#936cdf`, one
+low, and the exact value comes back only from a mean or mode over a block -- worth knowing
+before anyone spot-checks these hex values and thinks they have caught something. Declined
+as wording: that this paragraph names **Verification** in bold where a nearby line quotes
+"Not done" instead. Acted on, because it is the same class of slip round 2 caught and this
+session has the output: the `actool` quotation in "actool constraint, quoted" above had
+straight quotes and a straight apostrophe where actool printed curly ones.
+
+Round 4 read that batch and reported nothing to change. It reproduced the grain caveat
+exactly -- single pixel `#936cdf`, block mean and mode `#936ddf`, the same channel and the
+same direction -- and codepoint-checked the corrected quotation against the already-correct
+sibling message in this record. It hit the `actool` wall a third time, and adds one thing
+about it worth keeping: the relative-path behaviour is stateful, not a function of the path
+given, since two invocations from two different directories both echoed the *repository's*
+absolute prefix. It left one wording disagreement, recorded and not acted on: this
+paragraph says round 3 "reproduced all four of its claims, including the purple stop's
+`#936ddf`", while round 2's paragraph frames that same check as going one step further than
+the four it lists, so whether the purple stop is the fourth or a fifth is ambiguous on a
+cold read. This entry transcribes that round; it is the loop's terminator, not a new batch.
+
+**Verification.** All six macOS renditions through `ictool --export-image`, plus the signed
+bundle's icon as macOS renders it at 512 and 48 px in the system's dark appearance.
+`ictool` lives inside `Icon Composer.app/Contents/Executables/` and is what `actool` shells
+out to for a `.icon` package; it is a far better pixel oracle than assembling a bundle, and
+it is what the next person should reach for.
 
 ---
 
