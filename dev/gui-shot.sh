@@ -12,12 +12,12 @@
 #
 # Ported from Reticle's dev/gui-shot.sh (~/My_Projects/reticle/dev/gui-shot.sh); the
 # design and the guards below are unchanged from there because they encode a real
-# incident (see below), just retargeted at swiftemacs's SwiftPM/app-bundle layout.
+# incident (see below), just retargeted at pellicle's SwiftPM/app-bundle layout.
 #
-# Why this must run the BUNDLED, SIGNED binary and not a bare .build/release/swiftemacs:
+# Why this must run the BUNDLED, SIGNED binary and not a bare .build/release/pellicle:
 # the two hardened-runtime entitlements this whole self-test story exists to prove
 # (com.apple.security.cs.allow-jit, com.apple.security.cs.disable-library-validation)
-# only exist on .build/swiftemacs.app -- a bare .build/release/swiftemacs has no
+# only exist on .build/pellicle.app -- a bare .build/release/pellicle has no
 # entitlements and no hardened runtime at all, so a screenshot of it proves nothing
 # about the bundle a user would actually run. If the bundle is missing or stale, this
 # script tells the caller to run dev/make-app-bundle.sh rather than silently falling
@@ -47,15 +47,15 @@ set -eu
 FILE=${1:-}
 OUT=${2:-gui-shot.png}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-HELPER="${TMPDIR:-/tmp}/swiftemacs-gui-shot"
+HELPER="${TMPDIR:-/tmp}/pellicle-gui-shot"
 
 if [ "$(uname)" != "Darwin" ]; then
     echo "error: this script is macOS-only (it uses screencapture)" >&2
     exit 1
 fi
 
-APP="$ROOT/.build/swiftemacs.app"
-BIN="$APP/Contents/MacOS/swiftemacs"
+APP="$ROOT/.build/pellicle.app"
+BIN="$APP/Contents/MacOS/pellicle"
 if [ ! -x "$BIN" ]; then
     echo "error: $BIN not found -- run dev/make-app-bundle.sh first" >&2
     exit 1
@@ -88,7 +88,7 @@ while [ $i -lt 15 ]; do
         echo "error: the editor exited before a window appeared" >&2
         exit 1
     fi
-    INFO=$("$HELPER" swiftemacs 2>/dev/null || true)
+    INFO=$("$HELPER" pellicle 2>/dev/null || true)
     [ -n "$INFO" ] && break
     sleep 1
     i=$((i + 1))

@@ -1,6 +1,6 @@
-# macOS 26 native look and app shell for swiftemacs
+# macOS 26 native look and app shell for pellicle
 
-Topic key: macos-ui-design. Planning only — no code written to swiftemacs. Web research budget:
+Topic key: macos-ui-design. Planning only — no code written to pellicle. Web research budget:
 session-wide WebSearch was already exhausted before this agent ran (0 usable searches); all
 findings below come from WebFetch against primary-source URLs (Apple Developer docs / WWDC
 session transcripts / project docs) plus this agent's trained knowledge, with confidence marked
@@ -86,8 +86,8 @@ Why, with evidence:
   Ghostty's macOS app is "Swift with AppKit and SwiftUI," built on top of `libghostty`, a
   Zig-based cross-platform core library that is UI-agnostic. The GUI layer "leverages native
   components through AppKit and SwiftUI" including native features like Quick Look and force
-  touch. This is close to the swiftemacs situation: a performance-critical core (terminal
-  emulation for Ghostty, buffer+Elisp+rendering for swiftemacs) driving a native shell, with
+  touch. This is close to the pellicle situation: a performance-critical core (terminal
+  emulation for Ghostty, buffer+Elisp+rendering for pellicle) driving a native shell, with
   AppKit for the parts that need precise control (window chrome, menu, tight keyboard handling)
   and SwiftUI for auxiliary panels. Ghostty's core is *not* SwiftUI/AppKit at all — those only
   own the shell.
@@ -97,11 +97,11 @@ Why, with evidence:
   shaders (rectangles, shadows, text, icons, images) specifically because existing UI
   frameworks (including a prior attempt with Pathfinder) could not hit their performance target
   of a sustained 120 FPS. This is the "go it entirely alone" end of the spectrum. For
-  swiftemacs this is **not recommended**: it would mean reimplementing every native affordance
+  pellicle this is **not recommended**: it would mean reimplementing every native affordance
   (Liquid Glass, VoiceOver, Services menu, window tabs, Mission Control, Stage Manager
   integration, Continuity Camera drag-and-drop, etc.) that AppKit gives for free, and the brief
   explicitly says "lean heavily on Apple's own frameworks." Zed's approach is a defensible
-  choice for a company targeting three OSes at once from one Rust codebase; swiftemacs is
+  choice for a company targeting three OSes at once from one Rust codebase; pellicle is
   macOS-only and Swift-native, which removes Zed's central justification.
 - **Why not pure SwiftUI for the shell:** SwiftUI's `NSHostingView`/`NSViewRepresentable`
   bridge has real, documented interop cost — every SwiftUI subtree hosted inside AppKit (or
@@ -127,7 +127,7 @@ Why, with evidence:
   (line breaking, glyph shaping, bidi, ligatures — genuinely hard problems Apple has already
   solved), but final pixel presentation should go through a custom `CALayer`-backed or
   Metal-backed `NSView` so the redisplay loop (partial-buffer invalidation, smooth scrolling,
-  minimap, GPU-accelerated cursor/selection painting) is fully under swiftemacs's control —
+  minimap, GPU-accelerated cursor/selection painting) is fully under pellicle's control —
   this is the single biggest gap Reticle's README lists as a limitation ("fixed character-grid
   GUI ... no smooth scrolling, no minimap") and the fix is architectural, not incremental.
   Medium-high confidence recommendation (TextKit 2's existence and API shape is high
@@ -143,7 +143,7 @@ treated as **medium confidence** — worth a quick visual re-check against each 
 build before locking the visual language, since Liquid Glass shipped mid-2025 and several of
 these apps may have re-skinned their chrome since training data was collected.
 
-| App | Shell tech (medium confidence unless noted) | Notable chrome pattern relevant to swiftemacs |
+| App | Shell tech (medium confidence unless noted) | Notable chrome pattern relevant to pellicle |
 |---|---|---|
 | **Xcode 26** | AppKit, now visibly re-skinned for Liquid Glass (high confidence — Xcode 26.6 is installed on this machine per CONTEXT.md, so a live look is possible without web research) | Navigator/editor/inspector 3-pane `NSSplitViewController`; floating glass toolbar with segmented jump-bar; minimap on the editor's right edge; bottom debug/console drawer that overlays rather than reflows |
 | **Zed** | Custom GPUI (verified, no AppKit/SwiftUI at all) | Command palette (`Cmd-Shift-P`) as a centered modal overlay; status line at bottom with git branch/diagnostics; multi-pane splits with lightweight tab strip per pane |
@@ -160,7 +160,7 @@ background (image + alpha blend) behind a transparent `NSWindow`
 (`window.isOpaque = false`, `backgroundColor = .clear`), not via `NSVisualEffectView`/glass —
 vibrancy materials blur/sample the *desktop and windows behind* the app, whereas iTerm2's
 effect is the app's *own* image content faded and scaled, unrelated to what is behind the
-window. **Recommendation for swiftemacs (medium confidence):** implement the "terminal-like
+window. **Recommendation for pellicle (medium confidence):** implement the "terminal-like
 background image" feature the same way — a custom-drawn background layer under the text
 canvas, independent of Liquid Glass chrome, which stays reserved for the surrounding toolbar/
 sidebar per Apple's don't-use-glass-on-content rule from §1.
@@ -205,7 +205,7 @@ across many macOS releases):
   content after every edit.
 - **Recommendation:** budget this as a first-class milestone, not a follow-up. Reticle's own
   known-limitations list (from CONTEXT.md) doesn't mention accessibility, which likely means it
-  was never done for the character-grid GUI; swiftemacs should not repeat that gap given the
+  was never done for the character-grid GUI; pellicle should not repeat that gap given the
   brief's "solve every known pain point" and "extreme quality" framing.
 - **Unverified:** the exact current (macOS 26) names of the accessibility protocols
   (`NSAccessibilityStaticText` vs a unified informal-protocol approach) should be confirmed by
@@ -255,7 +255,7 @@ session).
 ## 7. App icon: `.icon` / Icon Composer (inherited from Reticle's M98)
 
 **High confidence — grounded in `/Users/jerrychen/My_Projects/reticle/PLAN.md` M98 (completed
-2026-09-03), read directly, not web research.** Key transferable findings for swiftemacs:
+2026-09-03), read directly, not web research.** Key transferable findings for pellicle:
 
 - macOS 26 no longer renders a bundle's `.icns` as drawn: the system plates it inside a glass
   container automatically (confirmed true even for full-bleed/square source art — margin is
@@ -273,7 +273,7 @@ session).
   better hand-made `.icns` on pre-26 systems if both are copied into the bundle. Only take
   `Assets.car` from the build output; keep a hand-authored `.icns` as the checked-in pre-26
   fallback, generated by the project's own icon-drawing pipeline (Reticle used a Python
-  centerline-based SVG generator; swiftemacs should design its own mark but can reuse this
+  centerline-based SVG generator; pellicle should design its own mark but can reuse this
   build-and-ship pattern).
 - Recommend committing the `.icon` **source** (gradient stops, flat glyph SVG) to the repo, not
   the compiled `Assets.car` (a build artifact), and deriving both representations' colors from
@@ -302,7 +302,7 @@ got real body text):**
   apps can drop the XPC services to shrink the bundle.
 - Sparkle is incompatible with Mac App Store distribution (Apple controls updates there); it's
   the standard choice for **Developer-ID-signed, directly-distributed** macOS apps — which fits
-  swiftemacs given it needs broad filesystem/shell access (M-! / shell-command / running an
+  pellicle given it needs broad filesystem/shell access (M-! / shell-command / running an
   actual terminal per the brief) that is friction-heavy or impossible under the App Store
   sandbox.
 
@@ -313,7 +313,7 @@ which independently corroborate "notarize via Developer ID"):**
 - Sign with a **Developer ID Application** certificate, with **Hardened Runtime** enabled
   (`codesign --options runtime`), then submit via `xcrun notarytool submit ... --wait`, then
   `xcrun stapler staple` the approved ticket onto the `.app`/`.dmg`/`.pkg`.
-- Hardened Runtime entitlements likely to matter for swiftemacs specifically, because it embeds
+- Hardened Runtime entitlements likely to matter for pellicle specifically, because it embeds
   a Lisp interpreter (possibly JIT-compiling, per the brief's "JIT" ask) and spawns a real
   shell: `com.apple.security.cs.allow-jit` and/or
   `com.apple.security.cs.allow-unsigned-executable-memory` if any JIT path writes+executes

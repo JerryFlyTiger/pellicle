@@ -1,6 +1,6 @@
 # Extension architectures compared, and sandboxed hosting options on macOS
 
-Topic key: extension-architectures. Research for swiftemacs planning (macOS-only Swift
+Topic key: extension-architectures. Research for pellicle planning (macOS-only Swift
 editor with a built-in Elisp interpreter). Confidence marked per claim: **high** (primary
 source, directly read), **medium** (primary source but inferred/summarized, or slightly
 stale), **low** (secondary/blog or memory-based), and a final **unverified** section for
@@ -20,7 +20,7 @@ WebFetch could reach, plus prior knowledge explicitly flagged as such).
 7. macOS native hosting options: ExtensionKit/ExtensionFoundation, XPC/NSXPCConnection,
    App Sandbox vs. a shell-running/any-file editor
 8. Wasm runtimes usable from Swift: WasmKit, wasmtime C API, wasm3, WAMR
-9. Recommendation: tiered plugin model for swiftemacs
+9. Recommendation: tiered plugin model for pellicle
 10. Unverified / could-not-confirm list
 
 ---
@@ -182,7 +182,7 @@ ABI was read directly from source, high confidence.)
   host/module version mismatch instead of reading garbage past a shorter/longer struct.
   `signal_error` is a deliberately narrowed v1 (`msg` only, no condition-symbol/data list
   like real Emacs's `non_local_exit_signal`), documented in Reticle's PLAN.md M13 as an
-  explicit scope cut. This is a good template for swiftemacs's own C-ABI module tier: small
+  explicit scope cut. This is a good template for pellicle's own C-ABI module tier: small
   function-pointer table, opaque handles, self-describing size for version skew detection,
   same-process (fast, unsafe) trust model reserved for code the user explicitly opted into.
 - **Net comparison to VS Code/JetBrains/Zed**: Emacs (and Reticle) sit at the opposite end
@@ -217,7 +217,7 @@ ABI was read directly from source, high confidence.)
     and IPC between them is XPC-based under the hood.
   - Reported as **not requiring Mac App Store distribution** for macOS ExtensionKit
     extensions, with **App Sandbox mandatory** for the extension side. This "no App Store
-    required" point is important for swiftemacs (a non-App-Store editor) but should be
+    required" point is important for pellicle (a non-App-Store editor) but should be
     treated as **medium confidence** pending a cleaner primary-source confirmation — the
     RESULTS.md spike already separately confirmed (section 2, high confidence, actually
     compiled) that `import ExtensionKit` and `import ExtensionFoundation` both typecheck
@@ -239,15 +239,15 @@ ABI was read directly from source, high confidence.)
   An `NSXPCConnection` to a helper tool or `.xpc` bundle gives process isolation, a
   Swift-protocol-shaped RPC surface (`NSXPCInterface`), and independent crash containment
   (the connection's `interruptionHandler`/`invalidationHandler` fire on the helper's death
-  without taking down the host). This is the natural mechanism for swiftemacs's
+  without taking down the host). This is the natural mechanism for pellicle's
   "sandboxed tier" plugins that need to do real work (parse a file, run a linter binary)
   without UI, and pairs well with a `Codable`-based JSON message shape if the team wants an
   API surface that could later also be spoken over stdio (matching the LSP/DAP tier).
-- **App Sandbox vs. an editor that must run shells and read any file**: swiftemacs's own
+- **App Sandbox vs. an editor that must run shells and read any file**: pellicle's own
   requirement (iTerm2-like shell hosting, `M-!`/`shell-command`, editing arbitrary files
   outside a sandboxed container) is fundamentally incompatible with the **host app itself**
   being App-Sandboxed with the default file-access entitlements — this is why the top-level
-  swiftemacs.app should almost certainly ship **unsandboxed** (like Emacs.app, iTerm2, VS
+  pellicle.app should almost certainly ship **unsandboxed** (like Emacs.app, iTerm2, VS
   Code, and Zed all do), while *specific plugin-hosting extension processes* it launches
   (ExtensionKit `.appex`, XPC helpers) can still be sandboxed individually. Sandboxing is a
   property of the process being launched, not a project-wide either/or — the recommended
@@ -269,7 +269,7 @@ ABI was read directly from source, high confidence.)
   10.13+/iOS/tvOS/watchOS/Linux/Android/Windows, and it ships inside the official Swift
   toolchain for Linux/macOS starting Swift 6.2 — meaning it can likely be adopted with **no
   external dependency at all**, just `import WasmKit` (or whatever the toolchain-provided
-  module is named) from a Swift 6.3 project, which is attractive for swiftemacs's
+  module is named) from a Swift 6.3 project, which is attractive for pellicle's
   "no third-party build" constraints during early milestones.
 - **wasmtime (via C API)** (high confidence for the interruption mechanisms, medium for
   everything else — the general C-API doc page fetched thin content, but the dedicated
@@ -316,9 +316,9 @@ ABI was read directly from source, high confidence.)
   the two things that would push toward the wasmtime C API instead, at the cost of a
   non-Swift-native dependency and a `50.0.0-dev` component-model surface).
 
-## 9. Recommended tiered plugin model for swiftemacs
+## 9. Recommended tiered plugin model for pellicle
 
-Given the comparison above and swiftemacs's own constraints (must feel like Emacs
+Given the comparison above and pellicle's own constraints (must feel like Emacs
 architecturally — in-process Elisp for config — but must not let plugins degrade
 performance/stability, and the host app itself must be unsandboxed to act as a shell/
 terminal), the recommended shape is a **three-tier model**, deliberately mirroring the
@@ -326,14 +326,14 @@ spread already visible across VS Code (host process boundary), Zed (Wasm sandbox
 Neovim (RPC remote plugins) rather than picking just one:
 
 **Tier 1 — in-process Elisp (config + light extension, the default/"just works" tier).**
-Runs on swiftemacs's own Elisp interpreter, in the main process, same trust model as real
+Runs on pellicle's own Elisp interpreter, in the main process, same trust model as real
 GNU Emacs. This is where `init.el`, mode hooks, keybindings, minor UI tweaks, and
 `define-derived-mode`/syntax-table style customization live — anything the owner would
 naturally reach for a `(defun my-...)` for. Principles to keep this tier from wrecking
 performance, borrowing Neovim's `textlock` idea and Emacs's own C-g/timeout culture:
   - **Never run Elisp on the UI-rendering thread's hot path** — buffer mutation and
     redisplay-triggering calls happen off the "must render this frame" critical section;
-    swiftemacs's redisplay should be able to skip a frame and show stale-but-consistent
+    pellicle's redisplay should be able to skip a frame and show stale-but-consistent
     state rather than block on Elisp.
   - Give every user-invoked Elisp call path a **soft wall-clock budget with a warning**
     (not a hard kill — killing Lisp mid-mutation risks corrupting buffer state the way a
@@ -345,7 +345,7 @@ performance, borrowing Neovim's `textlock` idea and Emacs's own C-g/timeout cult
     talk to Tier 2/3 plugins over their RPC surface (Elisp is the *orchestrator*, not
     excluded from talking to sandboxed code) — the goal is not to weaken Elisp, it's to keep
     *native, compiled, untrusted* code out of this tier. A byte-compiled/JIT'd Elisp form is
-    still interpreted/compiled by swiftemacs's own trusted runtime, so a bug in it is a bug
+    still interpreted/compiled by pellicle's own trusted runtime, so a bug in it is a bug
     in Elisp code, not memory corruption in the host.
 
 **Tier 2 — sandboxed native extensions, Wasm-first with an XPC/ExtensionKit escape hatch.**
@@ -353,10 +353,10 @@ This is the tier for compiled, potentially untrusted, performance-sensitive exte
 (e.g. a fast syntax highlighter, a custom completion scorer, a themed renderer plugin) that
 need native speed but should not be trusted with the run of the process:
   - **Primary mechanism: WasmKit**, since it ships in the Swift toolchain itself (Swift
-    6.2+, confirmed for macOS) — zero extra build/fetch step, consistent with swiftemacs's
+    6.2+, confirmed for macOS) — zero extra build/fetch step, consistent with pellicle's
     "lean on Apple/Swift-native" mandate and its avoidance of third-party build systems.
     Given WasmKit's interpreter-only execution and undocumented interruption/fuel support,
-    swiftemacs should design its own cooperative interruption points into the host-call
+    pellicle should design its own cooperative interruption points into the host-call
     boundary (WASI imports) rather than assume WasmKit gives free preemption — every
     host-import function the extension can call should itself check a deadline and trap
     cleanly, which sidesteps needing wasmtime's epoch mechanism.
@@ -364,7 +364,7 @@ need native speed but should not be trusted with the run of the process:
     JIT-class Wasm performance or wasmtime's epoch-interruption guarantee; bind it via a
     thin C shim module map. Not the default, given its non-Swift-native dependency and the
     component model's `-dev` maturity.
-  - **API shape**: define swiftemacs's own narrow WIT-like interface (can literally start as
+  - **API shape**: define pellicle's own narrow WIT-like interface (can literally start as
     a small set of `extern "C"`-shaped host functions passed into WasmKit's import table,
     Reticle-module-abi-style: opaque handles, no raw pointers into buffer internals,
     `size`-prefixed capability struct for version-skew detection) rather than depending on
@@ -377,18 +377,18 @@ need native speed but should not be trusted with the run of the process:
     plus a supported `EXHostViewController` UI-embedding story, at the cost of packaging
     the extension as a separate signed executable target. This is the right tool
     specifically when the extension needs to draw its own UI; Wasm is right when it's pure
-    computation feeding back into swiftemacs's own renderer.
+    computation feeding back into pellicle's own renderer.
 
 **Tier 3 — out-of-process services via LSP/DAP/JSON-RPC or XPC.**
 For anything that needs to be a real, capable program — language servers (already the plan
 per the brief: verible/slang/clangd/pyright/sourcekit-lsp), debuggers (DAP), linters,
 formatters, or a plugin the owner writes as an arbitrary external script/binary:
   - Standardize on JSON-RPC-over-stdio (LSP/DAP shape) as the default IPC, since it's
-    already required for language servers and gives swiftemacs a single client
+    already required for language servers and gives pellicle a single client
     implementation to maintain, matching Neovim's "remote plugin" philosophy of
     language-agnostic RPC rather than a bespoke ABI per plugin language.
   - Use **XPC/`NSXPCConnection`** instead when the plugin is itself Swift/Obj-C code
-    shipped as a helper tool bundled with swiftemacs (not a arbitrary external binary the
+    shipped as a helper tool bundled with pellicle (not a arbitrary external binary the
     user points at) — gives typed `NSXPCInterface` calls, independent crash/interruption
     handling, and a natural sandboxing boundary for the helper process, without inventing a
     wire protocol.

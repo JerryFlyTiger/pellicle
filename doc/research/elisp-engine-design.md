@@ -1,4 +1,4 @@
-# Emacs Lisp engine design for swiftemacs — compatibility without a bottomless pit
+# Emacs Lisp engine design for pellicle — compatibility without a bottomless pit
 
 Status: draft, single research pass. Builds on `spikes/RESULTS.md` (value representation,
 JIT feasibility), `research/jit-on-macos.md` §10 (staged JIT plan), and
@@ -24,7 +24,7 @@ summary.
 ## 1. Tiered compatibility target
 
 The owner's brief is explicit: users come from Doom/Purcell-style setups and write configs
-in Elisp, but swiftemacs does not commit to running arbitrary GNU packages. That means the
+in Elisp, but pellicle does not commit to running arbitrary GNU packages. That means the
 target is **"a config author's Elisp always works; a package author's Elisp usually works
 for the packages we chose to port; nothing promises byte-for-byte parity with the C core."**
 
@@ -71,12 +71,12 @@ internals a package should never poke directly but some do: `emacs-module.h` dyn
 ABI (Reticle already excludes this **[reticle]**; re-implementing the C ABI for arbitrary
 `.so`/`.dylib` modules is a multi-month undertaking with negative ROI when the target is a
 curated package set); native-comp (`.eln` compilation via libgccjit) — irrelevant, since
-swiftemacs's own bytecode/JIT tiers replace the reason native-comp exists; TTY/terminfo
+pellicle's own bytecode/JIT tiers replace the reason native-comp exists; TTY/terminfo
 line-discipline compatibility (X11/termcap-era code paths); obsolete APIs frozen for
 backward compat only (`cl.el` old-style, `common-lisp-indent-function`'s more obscure
 corners); byte-for-byte compatibility with `.elc` files compiled by GNU Emacs's own
-`bytecomp.el` (swiftemacs must compile Elisp *source* itself — pre-compiled `.elc` blobs
-from GNU's compiler encode GNU's opcode numbering, not swiftemacs's; **[general]**, Reticle
+`bytecomp.el` (pellicle must compile Elisp *source* itself — pre-compiled `.elc` blobs
+from GNU's compiler encode GNU's opcode numbering, not pellicle's; **[general]**, Reticle
 made the same call implicitly by having its own compiler); multi-frame/multi-tty display
 server code irrelevant to a single-window macOS app initially; `gnutls`/`tramp`'s full
 method zoo beyond SSH (Reticle already narrowed this to SSH-only key-auth **[reticle]** —
@@ -111,12 +111,12 @@ unlike a function that fails to *run* (which at least degrades one feature). Ver
   spiked this session — treat as Tier 2, needed for good error UX porting recent packages
   but not for basic loading.
 
-**Design for swiftemacs's reader:** a hand-written recursive-descent/state-machine reader
+**Design for pellicle's reader:** a hand-written recursive-descent/state-machine reader
 operating on `String.utf8`/raw bytes per swift-interpreter-perf.md §11's lexing guidance,
 not grapheme-cluster iteration; must produce the tagged-word `Value` representation directly
 (no intermediate boxed AST) per spikes/RESULTS.md #3's tagged-word conclusion. Needs: `#'`
 function-quote, `` ` ``/`,`/`,@` backquote (see §4), `#x`/`#o`/`#b` radix literals, `#[...]`
-raw bytecode-object literal syntax (used inside pre-compiled forms; swiftemacs's own
+raw bytecode-object literal syntax (used inside pre-compiled forms; pellicle's own
 compiler can just skip emitting this and use its own internal representation — **do not**
 try to parse GNU's `#[...]` byte-string payload, since it's GNU's opcode encoding, not
 transferable, consistent with the Tier-3 call on `.elc` above), `?\N{...}` Unicode name char
@@ -166,7 +166,7 @@ implementation]:**
   — `DynBind(SymId)` / `DynUnbind(count)` instructions **[reticle]** (`bytecode.rs`) — this
   is proven-workable prior art to build on directly rather than re-deriving.
 
-**Design for swiftemacs's buffer-local variables (concrete proposal):**
+**Design for pellicle's buffer-local variables (concrete proposal):**
 - Global value cell: a flat array indexed by interned `SymId` (matches spikes' tagged-word
   design; O(1) global lookup, no hashing on the hot path).
 - Buffer-local cell: each `Buffer` object owns a small hash map `SymId -> Value` for
@@ -202,7 +202,7 @@ whatever cross-thread synchronization macOS's AppKit/text-rendering pipeline req
 (likely a snapshot-and-hand-off pattern, matching the "JetBrains model" already chosen for
 background analysis work per PLAN.md's M15 note — read-only snapshots for cross-thread work,
 never live mutation from a second thread). `make-thread` (Emacs 26+ genuine OS threads) can
-exist in swiftemacs as a *user-facing* feature backed by the same GIL-like global-interpreter
+exist in pellicle as a *user-facing* feature backed by the same GIL-like global-interpreter
 mutex Emacs itself uses (only one thread runs Lisp at a time even with `make-thread`,
 per Emacs's actual design **[general]** — verify against oracle/`threads.c` before building
 if this feature is prioritized; it is Tier 2 at best since it's rarely load-bearing in
@@ -240,7 +240,7 @@ function calls. This is the leverage point: **implementing 22 special forms + a 
 macro expander + backquote gets a very large fraction of the language for free**, because
 the Elisp standard library itself is written this way. Reticle's own approach (writing an
 Elisp standard library in Elisp, `crates/core/lisp/` **[reticle]**) is the right model to
-keep: ship a swiftemacs-authored `subr.el`/`simple.el`-equivalent in Elisp itself rather than
+keep: ship a pellicle-authored `subr.el`/`simple.el`-equivalent in Elisp itself rather than
 hand-porting every macro to Swift, and get correctness by testing it against the same
 `emacs -Q --batch` oracle used in this report.
 
@@ -287,8 +287,8 @@ property here, and Reticle already independently arrived at the identical design
 `elisp-timeout` condition (PLAN.md M15: "`elisp-timeout` is deliberately not a subcondition
 of `error`... a hook wrapping itself in `ignore-errors` cannot swallow the interruption
 either" **[reticle]**) — confirming Reticle's designer correctly intuited real Emacs's actual
-`quit` semantics independently. **swiftemacs should keep `quit`/interrupt as a condition
-strictly outside the `error` hierarchy**, and any swiftemacs-specific interrupt condition
+`quit` semantics independently. **pellicle should keep `quit`/interrupt as a condition
+strictly outside the `error` hierarchy**, and any pellicle-specific interrupt condition
 (timeout, budget-exceeded — see PLAN.md M15 hook budgets) should follow the same rule: only
 an explicit handler for that exact condition symbol (or `t`/`condition-case`'s catch-all,
 which real Emacs's `condition-case` *does* allow via the `t` handler — verify) can intercept
@@ -328,7 +328,7 @@ jit-on-macos.md §10 Stage 0 already recommends ("Back-edge and call-entry check
 points model") and that Reticle already ships (PLAN.md M15: check every 64 steps, ~[reticle]).
 This is now triple-corroborated (GNU's real design, JSC's design per prior research, and
 Reticle's own measured-safe implementation) — high confidence this is the right interruption
-strategy for swiftemacs's VM too.
+strategy for pellicle's VM too.
 
 **What to keep vs. change for a tagged-word VM with inline caches:**
 
@@ -349,7 +349,7 @@ single addition given that config/package code repeatedly re-reads the same smal
 `defcustom` variables and calls the same small set of functions in hot loops (font-lock,
 `post-command-hook` chains). GNU's design has no IC slots reserved in its instruction
 encoding at all (each opcode is a single byte, occasionally followed by a 1-2 byte operand);
-swiftemacs's bytecode should reserve fixed-width operand fields with unused padding for an
+pellicle's bytecode should reserve fixed-width operand fields with unused padding for an
 inline-cache slot (function-redefinition epoch + cached resolved target) from the start, per
 jit-on-macos.md §10 Stage 0's explicit call-out ("Bytecode with fixed-width operands and
 reserved inline-cache slots"). Also change: GNU's `Value` is a boxed/tagged
@@ -391,7 +391,7 @@ mood-line-style mode lines) — so this should not be deprioritized as "buffers 
 avoids variable capture uses `(make-symbol "tmp")` or `gensym`-equivalent) are Tier 1 — macro
 hygiene is invisible until it's broken, and package macros are pervasive. The `SymId ->
 u32`-interning design Reticle already uses **[reticle]** (`value.rs`: `pub type SymId =
-u32`) is the standard and correct approach — swiftemacs's tagged-word `Value` should encode
+u32`) is the standard and correct approach — pellicle's tagged-word `Value` should encode
 interned symbols as a tag + index into a global symbol table exactly this way, keeping
 per-symbol property lists, function cells, and value cells in parallel arrays/side-tables
 indexed by the same `SymId` for O(1) access (matches the flat-array plan in §3).
@@ -401,7 +401,7 @@ interval-tree-like structure keyed by character position (historically `interval
 node-based structure; more recent Emacs added `itree.c`, an actual augmented interval tree,
 specifically to fix `O(n)` pathologies in the old design — **[general]**, this file wasn't
 directly fetched this session, flagged in §17 for a follow-up spike/fetch before finalizing
-the data-structure choice). The practical guidance for swiftemacs: use a genuine augmented
+the data-structure choice). The practical guidance for pellicle: use a genuine augmented
 interval tree (order-statistics or centered-interval design) from day one rather than
 Emacs's older linked-list-of-intervals approach, since `itree.c`'s existence in modern GNU
 Emacs is itself evidence the older design didn't scale and had to be replaced — don't
@@ -418,7 +418,7 @@ plus practically all editing commands rely on markers to keep point/region/overl
 coherent across edits. Reticle already has gap-buffer-integrated UTF-8-aware position
 tracking **[reticle]** (README: "Gap buffer with UTF-8 aware operations") — the marker
 abstraction on top of that buffer implementation is the piece to design fresh, keyed to
-swiftemacs's own buffer storage choice (swift-interpreter-perf.md §11 flags buffer storage
+pellicle's own buffer storage choice (swift-interpreter-perf.md §11 flags buffer storage
 as a "Should" item needing its own spike, not decided here).
 
 ## 8. Syntax tables and forward-sexp/syntax-ppss machinery
@@ -461,7 +461,7 @@ pressed" as a named key rather than as a character). A **terminal-only** Emacs c
 this distinction (there is no separate "Tab key" event over a TTY wire protocol — everything
 arrives as a byte stream, so `TAB` and `C-i` really are indistinguishable there), which is
 exactly why this is documented as a well-known GUI-only Emacs capability. **Design
-implication for swiftemacs**, which per the owner's brief is GUI-only (no CLI/TUI target):
+implication for pellicle**, which per the owner's brief is GUI-only (no CLI/TUI target):
 represent every keyboard input internally as a small tagged event type — `{ kind:
 .character(Int, modifiers: Set<Modifier>) | .functionKey(Symbol, modifiers: Set<Modifier>) |
 .mouse(...) }` — sourced from AppKit's `NSEvent` (which already distinguishes
@@ -469,7 +469,7 @@ represent every keyboard input internally as a small tagged event type — `{ ki
 path try the function-key form first, then fall back to the character form, mirroring
 `kbd`/`key-description`'s own dual representation exactly rather than collapsing everything
 to character codes early and losing the distinction (a mistake that would silently make
-swiftemacs *less* capable at keybinding than real GUI Emacs, contrary to the "extreme
+pellicle *less* capable at keybinding than real GUI Emacs, contrary to the "extreme
 performance... reliability" instinct which shouldn't come at the cost of feature regression
 here — this one is cheap to get right and expensive to retrofit since every keymap consumer
 downstream would need to change representation).
@@ -482,7 +482,7 @@ any Emacs user does and Doom/Purcell configs rebind extensively. Reticle already
 "keymaps (global, buffer-local and an emulation layer)" **[reticle]** and ships an evil-mode
 work-alike on top — that architecture (ordered list of active keymaps searched per keystroke,
 each mode contributing/removing its own) is standard and should be kept; the only addition
-swiftemacs needs beyond Reticle is the rich key-event distinction just described, since
+pellicle needs beyond Reticle is the rich key-event distinction just described, since
 Reticle's README doesn't mention it and Reticle has no GUI keyboard-event path to speak of
 beyond its egui character-grid front end (a TUI/GUI-shared crate, likely char-code-only —
 **[reticle]**, inferred from the shared-frontend architecture description, not independently
@@ -493,7 +493,7 @@ confirmed by reading Reticle's actual keymap-event code this session, flagged in
 `define-derived-mode` (Tier 2, urgent per §8) expands to: define a mode function that runs
 the parent mode's setup, sets `major-mode` and `mode-name`, creates/inherits a syntax table
 and keymap (usually `NAME-mode-map`, `NAME-mode-syntax-table`), and runs `NAME-mode-hook` at
-the end — a macro over primitives swiftemacs must already have (syntax tables §8, keymaps
+the end — a macro over primitives pellicle must already have (syntax tables §8, keymaps
 §9, hooks below), so it is "just" a macro once those exist, matching the leverage-point
 observation in §4. `define-minor-mode` similarly expands to a toggleable state variable, an
 autogenerated keymap-lookup entry in `minor-mode-map-alist`, and lighter/mode-line text — no
@@ -601,7 +601,7 @@ customization variables.
 **Autoload/load-path**: `load-path` is a list of directories searched in order by `load`/
 `require`; `autoload` registers a function as "load this file first, then call the real
 function" stub — both Tier 1, since every package manager (`use-package`, `straight.el`-
-style, or a from-scratch package manager swiftemacs might ship) is built on top of exactly
+style, or a from-scratch package manager pellicle might ship) is built on top of exactly
 these two primitives, and Doom/Purcell configs assume `load-path` manipulation
 (`add-to-list 'load-path ...`) works precisely.
 
@@ -641,7 +641,7 @@ brief's explicit call for "async primitives you propose to add." Real Emacs's ow
   event loop, dispatching any ready timers/process I/O/redisplay, until this process produces
   output or TIMEOUT elapses") rather than a true blocking read, which is exactly why other
   timers and even other processes' filters can still run while one piece of code is "waiting"
-  inside `accept-process-output`. **Design proposal for swiftemacs**: back `make-process`
+  inside `accept-process-output`. **Design proposal for pellicle**: back `make-process`
   with Foundation's `Process`/`Pipe` (or lower-level `posix_spawn` + `DispatchIO` for finer
   filter/backpressure control), with the actual OS-level I/O completion delivered via GCD to
   a dedicated dispatch queue, which then **hands the filter/sentinel call back onto the single
@@ -669,7 +669,7 @@ brief's explicit call for "async primitives you propose to add." Real Emacs's ow
   `make-thread` compatibility is prioritized**) only one thread executes Lisp at a time —
   it's cooperative, yielding at specific points (blocking I/O, explicit `thread-yield`), not
   true parallelism for Lisp code; this is consistent with, and a natural extension of, §3's
-  single-Lisp-thread architecture (a swiftemacs `make-thread` could be implemented as
+  single-Lisp-thread architecture (a pellicle `make-thread` could be implemented as
   additional *logical* Elisp execution contexts cooperatively scheduled onto the one real
   interpreter thread, exactly matching real Emacs's own actual concurrency model rather than
   attempting true parallel Lisp execution, which real Emacs itself doesn't provide either).
@@ -754,9 +754,9 @@ staffing/sequencing decisions easier (e.g. "the buffer + text-property + marker 
 land together, before syntax, before keymaps" is visible from the grouping in a way a flat
 list wouldn't show).
 
-## 16. What Reticle already solved vs. what swiftemacs must add or fix
+## 16. What Reticle already solved vs. what pellicle must add or fix
 
-| Area | Reticle status | swiftemacs action |
+| Area | Reticle status | pellicle action |
 |---|---|---|
 | Reader, macros, `condition-case`/`catch`/`unwind-protect`, bignums, hash tables | Solved **[reticle]** | Port design, re-verify against oracle, adapt to tagged-word `Value` |
 | Bytecode VM with fast-path fixnum ops | Solved, ~8x **[reticle]** | Port opcode shape; add IC slots (§6) GNU itself lacks |
@@ -767,10 +767,10 @@ list wouldn't show).
 | `define-derived-mode`, syntax tables, `syntax-ppss` | **Not implemented [reticle]** | New work, Tier 2-urgent (§8) — blocks most language-mode porting |
 | `format` width/flags/precision | **Gap [reticle]** | Promote to Tier 1 fix (§13) — small, high-visibility |
 | `emacs-module.h` ABI | **Not implemented, by design [reticle]** | Keep excluded (Tier 3, §1) |
-| GC (Rc-based, can leak cycles) | **Known limitation [reticle]** | swiftemacs's tagged-word + manual-arena design (spikes #3) with a real mark/sweep or similar should not inherit this — precise GC over the arena was already flagged as a "Should re-spike" item in swift-interpreter-perf.md §11, now doubly motivated by wanting to *fix*, not just match, this Reticle gap |
+| GC (Rc-based, can leak cycles) | **Known limitation [reticle]** | pellicle's tagged-word + manual-arena design (spikes #3) with a real mark/sweep or similar should not inherit this — precise GC over the arena was already flagged as a "Should re-spike" item in swift-interpreter-perf.md §11, now doubly motivated by wanting to *fix*, not just match, this Reticle gap |
 | `push`/`pop` limited to plain variable places (no `setf`-place generality) | **Gap [reticle]** | Tier 2 fix — `cl-lib`'s generalized-place system (`gv.el`) is what real `push`/`pop`/`incf`/`setf` build on; worth porting `gv.el`'s place-expander design rather than special-casing `push`/`pop` again |
 | Async LSP, background tree-sitter parsing, non-blocking hooks | Solved, exact architecture endorsed above (§10) | Inherit unchanged |
-| Rich GUI key-event model (TAB vs C-i) | **Not present** (Reticle's GUI is character-grid, likely char-code keymap dispatch only — **inferred, not confirmed by reading Reticle's keymap-event code this session**) | New work for swiftemacs (§9), cheap now, expensive later |
+| Rich GUI key-event model (TAB vs C-i) | **Not present** (Reticle's GUI is character-grid, likely char-code keymap dispatch only — **inferred, not confirmed by reading Reticle's keymap-event code this session**) | New work for pellicle (§9), cheap now, expensive later |
 | Buffer-local variable semantics interacting with `let` | **[reticle] presumed present** given a full Elisp implementation claim, but not independently spot-checked against the exact "which cell does `let` save" gotcha in §3 this session | Recommend a targeted correctness test against real Emacs oracle before assuming Reticle's implementation is a safe model to copy verbatim |
 
 ## 17. Unverified claims and pitfalls
@@ -806,7 +806,7 @@ list wouldn't show).
    correct in every simple test and breaks only in a specific cross-buffer interaction —
    needs a dedicated correctness-test suite comparing against the real Emacs oracle, not just
    "does it look right."
-2. `quit` (and any swiftemacs interrupt/timeout condition) must never be a subcondition of
+2. `quit` (and any pellicle interrupt/timeout condition) must never be a subcondition of
    `error` (§5) — getting this backwards silently defeats every interruption guarantee
    anywhere an `ignore-errors`/broad `condition-case` exists in user or package code, which is
    everywhere.

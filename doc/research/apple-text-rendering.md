@@ -305,7 +305,7 @@ general knowledge, needs a live doc check:
   computation yourself — measure each `CTLine`'s ascent/descent/leading
   (`CTLineGetTypographicBounds`) plus any inline-widget height, and maintain your own per-line
   height table/rope for scroll-offset math (this is the same problem class as Reticle's fixed
-  character grid — swiftemacs is explicitly moving away from that, so this table needs to support
+  character grid — pellicle is explicitly moving away from that, so this table needs to support
   non-uniform row heights from day one, unlike Reticle's GUI). If instead you use TextKit 2 purely
   as a layout oracle (§2a "could"), `NSTextLayoutFragment.layoutFragmentFrame`/`textLineFragments`
   already gives you correct variable heights per paragraph for free — a real reason to keep

@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 /// SelfTest: the launch-time self-test proving the two hardened-runtime entitlements
-/// that swiftemacs needs actually work on this machine.
+/// that pellicle needs actually work on this machine.
 ///
 /// - `com.apple.security.cs.allow-jit`: without it, `mmap(..., MAP_JIT, ...)` fails with
 ///   `EINVAL` under the hardened runtime (established by the 2026-09-05 spike,
@@ -66,7 +66,7 @@ package enum SelfTest {
             for (i, word) in code.enumerated() { p[i] = word }
         }
         pthread_jit_write_protect_np(1)
-        swiftemacs_icache_invalidate(raw, size)
+        pellicle_icache_invalidate(raw, size)
 
         typealias Fn = @convention(c) () -> Int32
         let fn = unsafeBitCast(raw, to: Fn.self)
@@ -85,7 +85,7 @@ package enum SelfTest {
     private static func dlopenCheck() -> Check {
         let name = "dlopen"
         let libraryName = "libSelfTestProbe.dylib"
-        let symbolName = "swiftemacs_selftest_probe"
+        let symbolName = "pellicle_selftest_probe"
 
         var candidates: [URL] = []
         if let frameworksURL = Bundle.main.privateFrameworksURL {

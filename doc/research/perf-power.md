@@ -36,7 +36,7 @@ the same pattern from a shipping competitor:
   avoid CPU/GPU race conditions without blocking, and replaced `wait_until_completed` with
   `wait_until_scheduled` and ultimately no CPU-side wait at all before `present_drawable` +
   `commit`, letting the GPU pipeline frames instead of the CPU stalling on each one.
-  **Actionable pattern for swiftemacs**: don't binary-switch "damage → 120 Hz, idle → paused
+  **Actionable pattern for pellicle**: don't binary-switch "damage → 120 Hz, idle → paused
   link" — add a short (≈1 s) linger period at the previous frame rate after the last input
   before dropping to idle, and use a small pool of reusable GPU buffers (glyph instance
   buffers, vertex buffers) rather than a single buffer guarded by a CPU wait.
@@ -54,7 +54,7 @@ primary source, full text retrieved):
 - **Recommended tolerance: at least 10% of the timer's interval.** Example given: a 3.0 s
   interval → 0.3 s tolerance; a `dispatch_source_set_timer` 1-second interval →
   `NSEC_PER_SEC / 10` leeway.
-- Consequence for swiftemacs: **every recurring, non-input-latency-critical timer** (cursor
+- Consequence for pellicle: **every recurring, non-input-latency-critical timer** (cursor
   blink, autosave, idle-triggered background reparse trigger, periodic UI polish like a
   "saved" indicator fade) must be created with an explicit ≥10% tolerance/leeway. The only
   timers that should have zero/near-zero tolerance are ones on the direct keystroke-to-pixel
@@ -84,7 +84,7 @@ independently reinforced by the WWDC21 Swift Concurrency transcript in §4):
   `.background`/`.utility` task is preferentially placed on E-cores; a `.userInteractive` task
   preferentially gets P-cores — this is the actual mechanism that keeps a background
   parse/index job from starving keystroke handling, more so than priority alone.
-- **Concrete scheduling rule for swiftemacs' background parser/indexer**: run it as
+- **Concrete scheduling rule for pellicle's background parser/indexer**: run it as
   `.utility` QoS work (not `.background`, unless it is truly invisible maintenance with no
   bearing on the current file's semantic highlighting), on a dedicated serial or low-concurrency
   `DispatchQueue`/`Task` — never inheriting `.userInteractive` by accidentally being invoked
@@ -123,7 +123,7 @@ play/wwdc2021/10254/` (high confidence — primary source, full transcript retri
   the main actor to the database actor and one to hop back... If your application spends a
   large fraction of time in context switching, you should restructure your code so that work
   for the main actor is batched up."
-- **Actionable rule for swiftemacs**: any per-keystroke or per-line hot path that touches both
+- **Actionable rule for pellicle**: any per-keystroke or per-line hot path that touches both
   background work (parsing, LSP round-trips, syntax highlighting) and UI state must **batch**
   the main-actor crossings — compute a whole result array/diff off the main actor, then do a
   single `await MainActor.run { applyAll(results) }` rather than hopping back to main once per
@@ -157,7 +157,7 @@ primary source, quoted text retrieved this session):
   the exact option-flag semantics were **not** re-confirmed against a live source this session;
   mark **medium confidence** for the specific flag names (they are stable, long-shipped API, but
   not re-quoted here).
-- **Consequence for swiftemacs, given it is a Metal-rendered app**: "isn't using OpenGL" implies
+- **Consequence for pellicle, given it is a Metal-rendered app**: "isn't using OpenGL" implies
   a Metal-backed window is *not* automatically exempt the way an OpenGL one historically was —
   App Nap can still throttle a backgrounded Metal-rendering editor window. That is almost
   certainly the **desired** behavior here (a backgrounded editor should nap — it is not doing
@@ -184,7 +184,7 @@ primary source, quoted text retrieved this session):
   absolute number to report externally), `--show-process-qos-tiers`, `--show-process-gpu`,
   `--show-cpu-qos` (per-CPU QoS breakdown — directly useful to verify §3's P/E-core placement
   claim empirically), `--show-process-coalition` (groups helper processes, e.g. an LSP server
-  child process, with the parent — important for swiftemacs since it will spawn language-server
+  child process, with the parent — important for pellicle since it will spawn language-server
   and shell child processes), `-f plist` for machine-readable output the release script can
   parse and diff run-over-run, `--show-pstates`/`--show-plimits` for detecting thermal throttling
   (P-state ceiling hit) during a soak test.
@@ -240,7 +240,7 @@ before relying on it for field telemetry design**):
 
 - Passive, OS-aggregated **24-hour payloads** delivered via `MXMetricManagerSubscriber.didReceive
   (_:[MXMetricPayload])`; **diagnostic payloads** (`didReceive(_:[MXDiagnosticPayload])`) cover
-  four categories directly relevant to swiftemacs' stability goals: **Hangs** (main-thread
+  four categories directly relevant to pellicle's stability goals: **Hangs** (main-thread
   unresponsive, with backtraces), **CPU Exceptions** (sustained high CPU with backtraces —
   exactly the "editor gets hot the longer it runs" failure mode the owner named as unacceptable),
   **Disk Write Exceptions** (excessive writes past a 1 GB/day threshold, with backtraces — would
@@ -368,7 +368,7 @@ API behavior):
   "file changed on disk, reload?" prompt) — lower latency than FSEvents, but does not scale to
   watching an entire tree (one fd/kqueue registration per watched path) and only sees the paths
   you explicitly registered, not new files appearing.
-- **Recommended split for swiftemacs**: one FSEvents stream per open project root (for the
+- **Recommended split for pellicle**: one FSEvents stream per open project root (for the
   project browser / "files changed outside the editor" background reindex trigger, tolerant of
   a several-hundred-ms-to-a-few-second latency), plus a `DispatchSourceFileSystemObject` per
   currently-open buffer's file descriptor (for immediate "this exact open file changed under
@@ -388,7 +388,7 @@ General/training knowledge, high confidence (stable Foundation/Dispatch APIs):
   on the pipe, which would burn wakeups even when the child is idle and adds latency up to the
   poll interval.
 - **`DispatchIO` is the better long-term choice over `FileHandle.readabilityHandler`** for
-  swiftemacs specifically because the editor's whole design (per the brief) includes acting as a
+  pellicle specifically because the editor's whole design (per the brief) includes acting as a
   real terminal with potentially high-throughput/high-frequency output (a `find`, a build log,
   `git log -p`) — `DispatchIO` supports chunked reads with a specified queue/QoS for the handler
   (tie the terminal's own read handler to a QoS matching its visibility: `.userInitiated` while
@@ -697,7 +697,7 @@ releases are visible, not just pass/fail on the latest run.
 - **MetricKit's macOS payload parity with iOS** (§6d) — the fetched WWDC session is iOS-focused;
   whether Hangs/CPU Exceptions/Disk Write Exceptions diagnostics are available identically on
   macOS, and whether `MXMetricManager.shared.pastPayloads` is usable for a locally-run,
-  non-TestFlight/App-Store-distributed app (relevant since swiftemacs will not be App-Store
+  non-TestFlight/App-Store-distributed app (relevant since pellicle will not be App-Store
   distributed, at least initially) — confirm against current macOS MetricKit documentation
   before designing the telemetry hookup around it.
 - **Xcode's Energy Gauge** (§6e) — described from general knowledge only; not fetched or

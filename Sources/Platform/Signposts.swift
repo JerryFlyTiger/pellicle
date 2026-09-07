@@ -5,24 +5,24 @@ import os
 /// boundary named in PLAN.md 4.14 rule 14 ("os_signpost intervals around every subsystem
 /// boundary ... behind a disable-able OSLog handle").
 ///
-/// Every signposter shares the subsystem string `app.swiftemacs`; the category
+/// Every signposter shares the subsystem string `app.pellicle`; the category
 /// distinguishes the boundary. Whether logging is active is decided once, at process
-/// startup, from the `SWIFTEMACS_SIGNPOSTS` environment variable (`0` disables), rather
+/// startup, from the `PELLICLE_SIGNPOSTS` environment variable (`0` disables), rather
 /// than checked on every signpost call — that check is not on the hot path.
 package enum Signposts {
     /// The subsystem string every `OSSignposter` here shares.
-    package static let subsystem = "app.swiftemacs"
+    package static let subsystem = "app.pellicle"
 
     /// Whether signposts are active, decided once at startup so the hot path never
-    /// re-reads the environment. `SWIFTEMACS_SIGNPOSTS=0` disables.
+    /// re-reads the environment. `PELLICLE_SIGNPOSTS=0` disables.
     package static let isEnabled: Bool = isEnabledGiven(
         environment: ProcessInfo.processInfo.environment)
 
     /// The pure decision `isEnabled` forwards to, exposed separately so a test can check
-    /// the `SWIFTEMACS_SIGNPOSTS=0` logic without depending on the current process's
+    /// the `PELLICLE_SIGNPOSTS=0` logic without depending on the current process's
     /// actual environment (which the `static let` above already captured once).
     package static func isEnabledGiven(environment: [String: String]) -> Bool {
-        environment["SWIFTEMACS_SIGNPOSTS"] != "0"
+        environment["PELLICLE_SIGNPOSTS"] != "0"
     }
 
     private static func makeLog(category: String) -> OSLog {

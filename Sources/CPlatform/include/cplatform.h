@@ -9,6 +9,6 @@
 
 #include <stddef.h>
 
-void swiftemacs_icache_invalidate(void *start, size_t len);
+void pellicle_icache_invalidate(void *start, size_t len);
 
 #endif

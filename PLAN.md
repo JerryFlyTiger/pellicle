@@ -1,17 +1,17 @@
-# swiftemacs Development Plan
+# pellicle Development Plan
 
 An Emacs-style editor for macOS, written in Swift on Apple's frameworks, with a built-in
 Emacs Lisp engine, designed from the ground up to remove GNU Emacs's structural pain
 points. It is the successor to Reticle (`~/My_Projects/reticle`, Rust, 110 milestones):
-Reticle proved the Verilog feature set and the process; swiftemacs replaces the parts of
+Reticle proved the Verilog feature set and the process; pellicle replaces the parts of
 Reticle that its own README lists as limitations (fixed character-grid GUI, synchronous
 remote I/O, non-rebindable minibuffer, `Rc` cycle leaks, no runtime grammars, no headless
 rendering) and adds the things the owner asked for that Reticle could not host (a native
 macOS shell, a real terminal, GPU rendering, a plugin ecosystem).
 
-**Positioning (owner, 2026-09-05):** swiftemacs is the macOS, Swift rewrite of Reticle and
+**Positioning (owner, 2026-09-05):** pellicle is the macOS, Swift rewrite of Reticle and
 of Emacs, but it must not be Reticle with a new coat: where Reticle is a Verilog editor,
-swiftemacs is positioned as a **multi-language editor with complete org-mode support**.
+pellicle is positioned as a **multi-language editor with complete org-mode support**.
 Verilog/SystemVerilog stays the first language and the proving ground, the other target
 languages are first-class rather than afterthoughts, and org-mode is built to GNU org's full
 feature level (agenda, capture, refile, clocking, babel, export, backlinks), not as a thin
@@ -46,7 +46,7 @@ Two consequences the owner should read before anything else:
 
 1. **GNU Emacs packages are a porting target, not a runtime target.** Every one of the five
    root causes of Emacs's pain (section 3) is fixable only if the Elisp contract is defined
-   narrowly. Reticle took the same stance and it held for 110 milestones. swiftemacs runs
+   narrowly. Reticle took the same stance and it held for 110 milestones. pellicle runs
    *its own* Elisp dialect: lexical by default, one dedicated interpreter thread, async
    primitives, rich key events. The **config idioms** of Doom/Purcell-style setups run
    (`use-package` forms, hooks, keymaps, `setq`/`setopt`, custom variables, mode hooks); a
@@ -89,7 +89,7 @@ The pain-point inventory (22 reported pain points, each traced to its root cause
 primary sources, and what Emacs 29-31 did about it) reduces to five decisions GNU Emacs
 made in the 1980s and cannot reverse:
 
-| Root decision in GNU Emacs | Pain it causes | swiftemacs decision that removes it |
+| Root decision in GNU Emacs | Pain it causes | pellicle decision that removes it |
 |---|---|---|
 | One thread owns everything: current buffer, point, narrowing, redisplay, the Lisp heap, dynamic bindings | Blocking UI, no real async, hooks and advice stall typing, TRAMP and LSP freezes, package updates freeze | **Three isolation domains**: the UI actor (main thread: input, layout, paint, AppKit), the Elisp actor (one dedicated thread with its own executor; all Elisp runs here, preemptible), and background actors (parse, index, search, LSP transport). Buffers are owned by the Elisp actor; everyone else reads immutable snapshots. `C-g` is delivered out of band as cancellation. |
 | Non-generational stop-the-world GC with an 800 KB threshold | Pauses over 100 ms for 56% of surveyed users; the `gc-cons-threshold` cargo cult; startup cost; the MPS-based `igc` still not merged as of Emacs 31 | **Engine-owned heap with a precise, incremental, generational collector** written in Swift over raw arenas (ARC does not manage Lisp objects). Explicit root stack; write barrier in the object model; pause budget measured in CI. Telemetry exposed, no user knob. |
@@ -172,7 +172,7 @@ definition-of-done somewhere in section 8:
 
 ### 4.2 Modules and dependency direction
 
-SwiftPM package `swiftemacs`, Swift 6 language mode. Dependencies point downward only.
+SwiftPM package `pellicle`, Swift 6 language mode. Dependencies point downward only.
 `package` access is visibility only, and M0 settled how the project actually gets
 cross-module optimisation — see "Cross-module optimisation" below; the short answer is no
 build flags at all.
@@ -589,7 +589,7 @@ because org files are irreplaceable personal data. So:
   block execution and tangle first, then multi-language babel with noweb) and export
   (HTML, Markdown, LaTeX/PDF when a TeX toolchain is present) → roam-style backlinks on the
   same index. All of it is in scope for v1; only mobile sync is not.
-- **Scope decision (owner, 2026-09-05)**: GNU org does complete GTD, so swiftemacs does
+- **Scope decision (owner, 2026-09-05)**: GNU org does complete GTD, so pellicle does
   too. The editor's agenda is the full thing (agenda views with custom commands, capture
   templates, refile with path completion, archiving, clocking and effort, habits, column
   view), not a complement to the owner's orgtd web app; orgtd's data model is a reference for
@@ -805,7 +805,7 @@ strings (`propertize`); `completing-read` metadata; async `make-process` with fi
 sentinels; idle timers; `make-thread` as cooperative logical threads on the one interpreter
 thread, exactly as GNU does it.
 
-**Tier 3, never.** The `emacs-module.h` ABI (swiftemacs has its own module ABI); native-comp
+**Tier 3, never.** The `emacs-module.h` ABI (pellicle has its own module ABI); native-comp
 and `.eln`; byte-for-byte `.elc` compatibility (the compiler consumes source); TTY and
 terminfo code paths; the old dumper; TRAMP methods beyond SSH; multi-tty display code; CCL
 and coding-system internals (strings are Unicode scalars with raw-byte escapes).
@@ -1222,7 +1222,7 @@ bundle was copied three times and each copy re-signed with a reduced entitlement
 | neither | FAIL | FAIL | 1 |
 
 Each check fails exactly when its own entitlement is withheld, and only then. Note for
-future readers: the *unbundled* `.build/release/swiftemacs --self-test` also prints two
+future readers: the *unbundled* `.build/release/pellicle --self-test` also prints two
 PASSes and proves nothing — `codesign -dv` shows `adhoc,linker-signed` with no hardened
 runtime, so neither restriction is being enforced there. Only the bundle
 (`adhoc,runtime`, `Runtime Version=26.5.0`) is the real test.
@@ -1409,10 +1409,10 @@ because Icon Composer's dark treatment darkens the background to near-black and 
 gradient onto the glyph -- so the darkest stop, which carries the most contrast against a
 light background, lands on the least against a dark one.
 
-**Files.** `assets/icon/swiftemacs.icon` is the Icon Composer package: hand-authored
+**Files.** `assets/icon/pellicle.icon` is the Icon Composer package: hand-authored
 `icon.json` (two-group layering, so the parentheses and the glyph get separate glass,
 shadow and parallax) plus two generated layer SVGs. `dev/gen-icon.py` generates those and
-`assets/icon/swiftemacs-flat.svg`, a flat single file for docs and the web, reading the
+`assets/icon/pellicle-flat.svg`, a flat single file for docs and the web, reading the
 gradient back out of `icon.json` so the two cannot drift. `dev/make-app-bundle.sh` needed
 no change beyond its comments -- its conditional actool step was written in M0 for exactly
 this artwork and compiled it unmodified.
@@ -1440,7 +1440,8 @@ cause printed above the backtrace: `Linear gradients require exactly 2 colors`. 
 `dev/make-app-bundle.sh` next to the actool invocation. A relative path to the `.icon`
 package also failed, with `The file “swiftemacs.icon” couldn’t be opened because there is
 no such file` above a path that had the relative one appended to the package's own
-(`.../assets/icon/swiftemacs.icon/assets/icon/swiftemacs.icon`). That is the observation,
+(`.../assets/icon/swiftemacs.icon/assets/icon/swiftemacs.icon`) -- the project's name at
+the time, left as the tool printed it. That is the observation,
 not a mechanism: a cold reviewer could not reproduce it cleanly and left it unresolved, and
 neither could a later attempt from inside the package directory, which compiled normally.
 It does not reach the shipped code either way -- `ROOT` at `dev/make-app-bundle.sh:51` is
@@ -1625,7 +1626,7 @@ paragraph says round 3 "reproduced all four of its claims, including the purple 
 the four it lists, so whether the purple stop is the fourth or a fifth is ambiguous on a
 cold read. This entry transcribes that round; it is the loop's terminator, not a new batch.
 
-**The README's image**, `assets/icon/swiftemacs-256.png`, is a render, not artwork:
+**The README's image**, `assets/icon/pellicle-256.png`, is a render, not artwork:
 `ictool ... --rendition Default --width 256 --height 256 --scale 1` against the package.
 `dev/gen-icon.py` does not produce it; regenerate it with that command if the mark changes.
 
@@ -1672,6 +1673,80 @@ entry transcribes that round; it is the loop's terminator, not a new batch.
 Left alone deliberately: `lisp/`, `Sources/Lisp/Builtins/` and `Tests/CanvasTests/Golden/`
 are named by `CLAUDE.md` as conventions for where things go when they exist, not as things
 to run, and their milestones have not happened.
+
+---
+
+## Renamed from swiftemacs to pellicle, 2026-09-07
+
+**Why.** The owner asked whether the icon or the name carried infringement risk. The icon
+does not; the name did.
+
+- **Copyright, and Taiwan's reproduction offence specifically.** `著作權法` Art. 91 punishes
+  one who "擅自以重製之方法侵害他人之著作財產權" -- up to three years, or six months to five
+  years where there is intent to sell. The offence needs a work that was reproduced, and
+  there is none: the icon's geometry is Bezier control points chosen in `dev/gen-icon.py`,
+  with no font outline, no tracing and no reference to any existing mark. Art. 9(3) puts
+  "通用之符號" outside copyright altogether, which is what a lambda and a pair of brackets
+  are, and Art. 10-1 limits protection to expression, not the idea of using a lambda for
+  Lisp. GNU Emacs 30.2's own icon was rendered and compared: a purple disc with a white
+  ribbon E, sharing nothing with this mark but the existence of purple.
+- **The name was the real exposure.** `Swift®` is on Apple's published trademark list as
+  "software technology", and Apple's third-party guidelines say: "You may not use or
+  register, in whole or in part, Apple, iPod, iTunes, Macintosh, iMac, **or any other Apple
+  trademark**...as or as part of a company name, trade name, product name, or service
+  name except as specifically noted in these guidelines." The only carve-out is "Mac", and
+  only for products that are not computers or operating-system software. `swiftemacs` used
+  the mark in a product name in Apple's own field, developer software, which is where a
+  confusion argument is strongest. Apple has tolerated SwiftLint and its kin, but tolerance
+  is not permission, and those are libraries rather than a signed, distributed application.
+- **`Emacs` was not the problem.** The FSF's registered marks are FSF, Free Software
+  Foundation and GNU; Emacs does not appear among them, and XEmacs, Aquamacs, Spacemacs and
+  Doom Emacs have coexisted for years. (Secondary source: the FSF's own trademark page
+  returned 404.)
+- Valve holds an EU trademark on the lowercase lambda, scoped to downloadable game
+  software. Different class, and its mark is a bare orange lambda where this one is a white
+  lambda inside parentheses on a gradient. Recorded as known, not as a blocker.
+
+**The name.** A pellicle is the thin transparent membrane suspended above a photomask,
+keeping particles out of the focal plane so that defects do not print. It continues
+Reticle's lithography vocabulary without reusing its name, it is the layer that sits *on* a
+reticle, and "the layer that keeps defects out of the product" is what this project's cold
+reads, gates and oracles are for. GitHub has no project of consequence by that name.
+
+**What changed.** Every occurrence, 298 of `swiftemacs` plus nine `SWIFTEMACS` environment
+variables and one `SwiftEmacs`: the executable and product name, the bundle identifier
+(`app.swiftemacs` to `app.pellicle`), the entitlements file, the icon package and its two
+exports, the `pellicle_icache_invalidate` C shim symbol, `PELLICLE_WATCHDOG` and
+`PELLICLE_SIGNPOSTS`, this file, `CLAUDE.md`, `README.md` and the research reports. Prose
+still says the editor is written in Swift, which is the referential use Apple's own
+guidelines permit. Verified after the rename: the gate green at 20 tests, the bundle built
+and ad-hoc signed, both self-test entitlement checks passing under the hardened runtime,
+and the icon regenerating byte-identical and rendering.
+
+**Where the old name survives, and the rule for it.** A global replace rewrites history as
+happily as it rewrites code, and a cold read caught it doing exactly that four times. The
+rule applied: **the new name everywhere the text describes the project; the old name
+wherever the text quotes something, cites a path that existed, or states a dated
+observation.** So `swiftemacs` still stands in the actool error message this file quotes
+verbatim, in the M0 done-table's observed window title (commit `88a319f` set
+`window.title = "swiftemacs"`, so no other value was ever seen on 2026-09-06), in the
+planning brief's scratch-path guard, and in two research reports' citations of scratch
+paths that really existed under that name. The same read caught fourteen possessives that
+the replace had broken: `swiftemacs'` is correct for a name ending in *s*, `pellicle's` is
+not, and the apostrophe had been left bare.
+
+*Round 2 of the cold read found nothing to change.* It re-derived the window title from
+`88a319f`, diffed the restored quotation and all three path citations byte-for-byte against
+the pre-rename `HEAD`, counted the fourteen possessives in the diff, and swept the tree in
+both directions -- nothing left unrestored, nothing restored that was describing the project
+rather than quoting it. Its one observation is recorded and not acted on: the list above
+groups the two research reports' path citations as one item, so it reads as four categories
+where another reading would say three files. This entry transcribes that round; it is the
+loop's terminator, not a new batch.
+
+**Not settled here.** Whether a mark is confusingly similar is a lawyer's judgement and not
+one this record can make. What it can record is that the specific, documented conflict --
+an Apple registered mark used as part of a product name in Apple's own field -- is gone.
 
 ---
 

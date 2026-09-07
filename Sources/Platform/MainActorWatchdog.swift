@@ -19,12 +19,12 @@ package final class MainActorWatchdog: @unchecked Sendable {
     package typealias OverrunHandler = @Sendable (Duration) -> Void
 
     /// Enabled by default only in debug builds, or in any build when
-    /// `SWIFTEMACS_WATCHDOG=1` is set.
+    /// `PELLICLE_WATCHDOG=1` is set.
     package static var isEnabledByDefault: Bool {
         #if DEBUG
             return true
         #else
-            return ProcessInfo.processInfo.environment["SWIFTEMACS_WATCHDOG"] == "1"
+            return ProcessInfo.processInfo.environment["PELLICLE_WATCHDOG"] == "1"
         #endif
     }
 
@@ -85,7 +85,7 @@ package final class MainActorWatchdog: @unchecked Sendable {
         let t = Thread { [weak self] in
             self?.runOnDedicatedThread()
         }
-        t.name = "app.swiftemacs.watchdog"
+        t.name = "app.pellicle.watchdog"
         t.qualityOfService = .utility
         lock.lock()
         thread = t

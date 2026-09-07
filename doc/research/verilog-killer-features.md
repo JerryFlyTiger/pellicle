@@ -1,7 +1,7 @@
-# Verilog/SystemVerilog killer coding features for swiftemacs
+# Verilog/SystemVerilog killer coding features for pellicle
 
 Topic key: verilog-killer-features. Planning research only — no code written under
-swiftemacs, no builds run. Confidence tags: **high** (verified against primary source
+pellicle, no builds run. Confidence tags: **high** (verified against primary source
 or reproduced locally, incl. via the two servers installed on this machine and Reticle's
 own probe transcripts in PLAN.md), **medium** (single secondary source / WebFetch
 summary, plausible but not cross-checked), **low** (inferred). A final "unverified"
@@ -64,7 +64,7 @@ All entries **high confidence** (Reticle's own PLAN.md milestone records, severa
 independently probed against the real `verible-verilog-ls` / `slang-server` binaries
 by Reticle's own development process — see the M54/M55/M59/M94/M95/M99 probe tables).
 
-**Built and working (candidates to port the *design*, not the code, since swiftemacs
+**Built and working (candidates to port the *design*, not the code, since pellicle
 is a new Swift codebase):**
 
 - Homegrown AUTO system (M39, M92): AUTOINST/AUTOWIRE/AUTOARG using a real tree-sitter
@@ -96,7 +96,7 @@ is a new Swift codebase):**
 - `textDocument/references` — "who instantiates this module" (M59), `M-?`. Verified
   against a synthetic 890-file/154k-line RTL tree: 400/400 correct hits, symbol-table
   precision (not text matching — distinguishes a port's formal name from an unrelated
-  identically-named local signal). **Known trap, high value for swiftemacs to avoid**:
+  identically-named local signal). **Known trap, high value for pellicle to avoid**:
   with no `verible.filelist`, references silently returns `[]`, indistinguishable from
   "there are truly no references"; with a filelist that only lists half the files, it
   silently returns half the answer with no warning.
@@ -115,7 +115,7 @@ is a new Swift codebase):**
   below.
 
 **Reticle gaps** (explicitly excluded or unverified in v1, i.e. real opportunities for
-swiftemacs to do better rather than just port):
+pellicle to do better rather than just port):
 
 - AUTOSENSE, AUTOINPUT/AUTOOUTPUT/AUTOINOUT, AUTOREG/AUTORESET/AUTOTIEOFF/AUTOUNUSED,
   instance arrays — all still unimplemented (gap-inventory row 6).
@@ -125,7 +125,7 @@ swiftemacs to do better rather than just port):
   another file) has no working source at all when only verible is attached; it falls
   through to buffer-only dabbrev. **Confirmed fixable**: slang-server *does* declare
   `completionProvider` and returns real typed candidates (M91-M93 record) — this is
-  exactly the kind of capability-routing swiftemacs should build in from day one rather
+  exactly the kind of capability-routing pellicle should build in from day one rather
   than retrofit.
 - `textDocument/references` incompleteness with a partial/missing filelist is silent
   by design of the servers, not fixable client-side without a disk cross-check scanner
@@ -164,12 +164,12 @@ reproduced; specific numeric/architectural claims not cross-checked).
   specifically because of the semantic-database-first architecture rather than a
   regex/LSP-only approach.
 
-**Takeaway for swiftemacs**: both commercial tools' headline differentiator versus
+**Takeaway for pellicle**: both commercial tools' headline differentiator versus
 free-tool LSP servers is a **persistent, incremental, whole-project semantic index**
 (not per-request LSP round trips) that powers real-time checking, structural
 navigation, and UML-style visualization at scale. Reticle never built this — it
 recomputes locally on each keystroke/action and treats LSP as external. This is the
-architectural gap most worth deciding on early for swiftemacs if DV/UVM users are a
+architectural gap most worth deciding on early for pellicle if DV/UVM users are a
 target, not just RTL authors.
 
 ## 5. VS Code extensions: TerosHDL, mshr-h Verilog-HDL, svlangserver
@@ -220,13 +220,13 @@ false-positive include error 11 prior config attempts failed to clear).
 | documentSymbol | under-typed (module tagged generic `Method`, no params/ports) | correctly typed, more complete |
 | requires `verible.filelist` for cross-file features | yes, and silently degrades without one or with a partial one | not documented/tested here |
 
-**Conclusion, directly reusable as an architectural decision for swiftemacs**: neither
+**Conclusion, directly reusable as an architectural decision for pellicle**: neither
 server is sufficient alone; the two are complementary (format+lint from verible,
 elaboration diagnostics+completion+correct rename/references from slang). A
 single-attached-server-per-buffer design (what most VS Code extensions and Reticle
 started with) is a real functional regression versus attaching both and routing by
 per-method probed correctness — this is Reticle's single most valuable, hard-won,
-directly-portable finding for swiftemacs's LSP client design.
+directly-portable finding for pellicle's LSP client design.
 
 ## 7. Lint/format/simulate loop
 
@@ -243,7 +243,7 @@ extractor for cross-reference-grade IDE integration. Reticle already depends on
 compliant SystemVerilog frontend" per the chipsalliance open-source test suite,
 explicitly engineered to "remain functional even with incomplete code" so it can serve
 editor completion/highlighting mid-edit — a deliberately robust-parse design point
-worth adopting for swiftemacs's own SystemVerilog front end if one is ever
+worth adopting for pellicle's own SystemVerilog front end if one is ever
 homegrown rather than delegated to slang.
 
 **Simulation loop**: `iverilog` is installed locally (`/opt/homebrew/bin/iverilog`);
@@ -268,7 +268,7 @@ these are commonly cited claims about surfer elsewhere but are **unverified** he
 gtkwave was not fetched at all (budget). mshr-h's extension embeds a lightweight VCD
 viewer (Fliplot) with an optional heavier Vaporview extension — this is a real,
 verified pattern (bundle a basic viewer, let users opt into a fuller one) worth
-copying for swiftemacs rather than either shipping nothing or over-investing in a
+copying for pellicle rather than either shipping nothing or over-investing in a
 full waveform viewer at v1.
 
 ## 9. Project/filelist management, UVM, SVA, CDC, coverage
@@ -281,14 +281,14 @@ full waveform viewer at v1.
   relative include path resolving against the *server process's own cwd*, not the
   workspace root or the config file's directory, so `-I include` only worked "by
   accident" for a user who happened to launch the editor from the project root (M99).
-  **Any swiftemacs LSP client must explicitly set the spawned server's working
+  **Any pellicle LSP client must explicitly set the spawned server's working
   directory to the computed project root — do not rely on inheriting the editor's own
   cwd.**
 - **UVM (class hierarchy, factory, phases, snippets)**: **no tool surveyed here —
   free or Reticle — has real UVM semantic awareness**, except the two commercial IDEs
   (Sigasi, DVT) which advertise it explicitly (DVT: dedicated UVM/OVM-migration
   tooling). svlangserver documents this gap in its own words. This is a clear, large,
-  currently-unaddressed opportunity for swiftemacs to differentiate for verification
+  currently-unaddressed opportunity for pellicle to differentiate for verification
   engineers specifically, not just RTL authors — but it is also the highest-effort
   item on this list (needs class-hierarchy-aware semantic analysis, not just
   syntax/LSP wiring).
@@ -298,10 +298,10 @@ full waveform viewer at v1.
   of dedicated SVA-authoring UX, coverage visualization, or CDC-specific static
   analysis in *any* source consulted. Treat as **unverified/likely thin across the
   whole industry tooling landscape outside the top two commercial IDEs**, and as an
-  open research question for a later, deeper pass if the owner wants swiftemacs to
+  open research question for a later, deeper pass if the owner wants pellicle to
   target DV engineers as hard as RTL authors.
 
-## 10. Prioritized top-10 killer-feature list for swiftemacs
+## 10. Prioritized top-10 killer-feature list for pellicle
 
 Ranked by (a) how many real RTL/DV edits the feature touches, per Reticle's own
 frequency-based ranking rule, and (b) evidence strength.
@@ -317,7 +317,7 @@ frequency-based ranking rule, and (b) evidence strength.
    balance-scanning) solved.
 3. **Complete the AUTO family**: AUTOSENSE, AUTOINPUT/OUTPUT/INOUT,
    AUTOREG/AUTORESET/AUTOTIEOFF/AUTOUNUSED, instance arrays — *Reticle gap, new work
-   for swiftemacs.* High value, low novelty risk (semantics are documented in GNU
+   for pellicle.* High value, low novelty risk (semantics are documented in GNU
    verilog-mode's own source, Section 2), extends #2 directly.
 4. **Local-first, LSP-fallback module-name / port-name / parameter completion at
    instantiation sites, never falling through to buffer-only dabbrev at a confirmed
@@ -328,7 +328,7 @@ frequency-based ranking rule, and (b) evidence strength.
    filelist-aware fallback** — *exists in Reticle (module only), Reticle gap
    (interface/package/class/program), reuse the jump design and extend its coverage.*
 6. **A persistent, incremental, whole-project semantic index** (not per-keystroke
-   local rescans, not bare LSP round-trips) — *new for swiftemacs.* This is what
+   local rescans, not bare LSP round-trips) — *new for pellicle.* This is what
    separates DVT/Sigasi from every free tool surveyed, and it is the architectural
    root cause behind Reticle's "no caching, rescans every library file" limitation.
    Worth deciding early since it affects the whole LSP/nav/completion layer's shape.
@@ -342,12 +342,12 @@ frequency-based ranking rule, and (b) evidence strength.
    Reticle (the routing table + methodology), reuse the design and its verification
    discipline.*
 9. **UVM class-hierarchy/factory/phase awareness and snippets** — *new for
-   swiftemacs, no free-tool precedent found; only Sigasi/DVT claim it.* High effort,
+   pellicle, no free-tool precedent found; only Sigasi/DVT claim it.* High effort,
    high differentiation for DV engineers; recommend scoping as a distinct milestone
    after RTL-author features are solid, per the owner's own stated priority order
    (Verilog first, but RTL-and-DV both fall under "Verilog/SystemVerilog" priority).
 10. **A bundled lightweight waveform viewer with an escape hatch to something fuller**
-    — *new for swiftemacs*, modeled on the mshr-h extension's Fliplot+Vaporview
+    — *new for pellicle*, modeled on the mshr-h extension's Fliplot+Vaporview
     pattern (verified) rather than surfer's specific technical claims (unverified
     here). Lower priority than 1-9 because it's adjacent tooling, not an editing
     feature, but explicitly named in the brief.
@@ -359,7 +359,7 @@ frequency-based ranking rule, and (b) evidence strength.
   `referencesProvider: true` and both under- and over-answers in different ways. Probe
   the real binary before writing client code, every time — this was Reticle's single
   most-repeated process rule (cited in nearly every M5x/M9x record) and directly
-  applicable to a fresh swiftemacs LSP client.
+  applicable to a fresh pellicle LSP client.
 - **A server that "answers" is not the same as a server that answers correctly.**
   verible's `rename` can produce code that violates IEEE 1800 §23.2.5 (mismatched
   `endmodule : name` label) — a silent correctness bug, not a missing feature.
@@ -367,7 +367,7 @@ frequency-based ranking rule, and (b) evidence strength.
   against the other.
 - **Silent partial answers are worse than errors.** Missing/partial `verible.filelist`
   → `references` returns `[]` or half the true answer with zero signal to the user
-  that anything is wrong. Any swiftemacs feature that depends on a filelist should
+  that anything is wrong. Any pellicle feature that depends on a filelist should
   surface filelist coverage/staleness explicitly.
 - **Guard conditions that gate "does this buffer have any client" can permanently
   block a second server from ever attaching for the session, with no error message**
@@ -381,12 +381,12 @@ frequency-based ranking rule, and (b) evidence strength.
 - **Test fixtures that "pass" but never reach the code under test are a recurring,
   not rare, failure mode** — Reticle names this "masking" and hit it independently at
   least four times across different milestones (M54, M55, M91 three separate times in
-  one milestone). Any swiftemacs test-writing discipline for Verilog features should
+  one milestone). Any pellicle test-writing discipline for Verilog features should
   budget for mutation testing, not just green tests, from the start.
 - **Regex-based template/config parsing breaks on real RTL comments containing literal
   parentheses** (`// see (note)`) — AUTO_TEMPLATE's EXPR body had to move from regex to
   balance-scanning for exactly this reason (M92). Any new template/macro-expansion
-  engine for swiftemacs's AUTO system should balance-scan from the start.
+  engine for pellicle's AUTO system should balance-scan from the start.
 
 ## 12. Unverified claims (explicitly not confirmed within budget)
 

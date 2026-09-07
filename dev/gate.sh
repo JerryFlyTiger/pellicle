@@ -1,5 +1,5 @@
 #!/bin/sh
-# dev/gate.sh — the swiftemacs definition of done (CLAUDE.md, "Build and verification").
+# dev/gate.sh — the pellicle definition of done (CLAUDE.md, "Build and verification").
 #
 # Read the test result from .build/test.log, never from `$?` after a pipe: the exit code
 # of `tee` is always 0.

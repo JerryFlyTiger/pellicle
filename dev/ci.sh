@@ -23,17 +23,17 @@ echo "=================================================================="
 dev/make-app-bundle.sh
 
 echo "=================================================================="
-echo "4/5  .build/swiftemacs.app/Contents/MacOS/swiftemacs --self-test"
+echo "4/5  .build/pellicle.app/Contents/MacOS/pellicle --self-test"
 echo "=================================================================="
 # This is the milestone's definition of done: the self-test passing here means MAP_JIT
 # and dlopen both work under the hardened runtime with the entitlements, not merely in
 # an unsigned, unentitled process where both checks pass for an uninteresting reason.
-.build/swiftemacs.app/Contents/MacOS/swiftemacs --self-test
+.build/pellicle.app/Contents/MacOS/pellicle --self-test
 
 echo "=================================================================="
 echo "5/5  codesign --verify --strict"
 echo "=================================================================="
-codesign --verify --strict .build/swiftemacs.app
+codesign --verify --strict .build/pellicle.app
 
 # TODO(M6): golden-image checks against the canvas's headless render path once the
 # canvas exists; there is nothing to render yet in M0.

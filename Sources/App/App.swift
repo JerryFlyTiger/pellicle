@@ -18,7 +18,7 @@ package enum AppModule {
 private let appLog = OSLog(subsystem: Signposts.subsystem, category: "app")
 
 @main
-struct SwiftEmacsApp {
+struct PellicleApp {
     static func main() {
         let arguments = CommandLine.arguments
         if arguments.contains("--self-test") {
@@ -48,7 +48,7 @@ struct SwiftEmacsApp {
     }
 
     /// `CFBundleShortVersionString` when running from a bundle; otherwise (running
-    /// unbundled, e.g. `.build/debug/swiftemacs` or `.build/release/swiftemacs`, where
+    /// unbundled, e.g. `.build/debug/pellicle` or `.build/release/pellicle`, where
     /// there is no `Info.plist`) walks up from the running executable looking for the
     /// repository's root `VERSION` file.
     private static func versionString() -> String {
@@ -130,13 +130,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             contentRect: contentRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = "swiftemacs"
+        window.title = "pellicle"
         // Remembers its frame across launches under this autosave name.
         window.setFrameAutosaveName("MainWindow")
         return window
     }
 
-    /// A minimal main menu: the `swiftemacs` application menu (About, Hide, Quit ⌘Q)
+    /// A minimal main menu: the `pellicle` application menu (About, Hide, Quit ⌘Q)
     /// and a File menu with Close ⌘W.
     @MainActor
     static func buildMainMenu() -> NSMenu {
@@ -148,17 +148,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         appMenu.addItem(
             NSMenuItem(
-                title: "About swiftemacs",
+                title: "About pellicle",
                 action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                 keyEquivalent: ""))
         appMenu.addItem(.separator())
         appMenu.addItem(
             NSMenuItem(
-                title: "Hide swiftemacs", action: #selector(NSApplication.hide(_:)),
+                title: "Hide pellicle", action: #selector(NSApplication.hide(_:)),
                 keyEquivalent: "h"))
         appMenu.addItem(
             NSMenuItem(
-                title: "Quit swiftemacs", action: #selector(NSApplication.terminate(_:)),
+                title: "Quit pellicle", action: #selector(NSApplication.terminate(_:)),
                 keyEquivalent: "q"))
 
         let fileMenuItem = NSMenuItem()

@@ -1,8 +1,8 @@
-# swiftemacs — planning context (read this first)
+# pellicle — planning context (read this first)
 
 ## What the owner asked for (translated from the owner's Traditional Chinese brief, 2026-09-05)
 
-The editor is named **swiftemacs**. It must be written in **Swift**, carry a built-in
+The editor is named **pellicle**. It must be written in **Swift**, carry a built-in
 **Emacs Lisp interpreter**, and **solve every well-known pain point of GNU Emacs**. It targets
 **macOS only** for now, and should lean heavily on **Apple's own frameworks**.
 
@@ -48,7 +48,7 @@ on by default, org-mode file-compatible, Verilog AUTO system (AUTOINST/AUTOWIRE/
 AUTO_TEMPLATE), cross-file module jump, verible.filelist, port completion, indent-width
 detection, background project search with editable results, TRAMP-style SSH editing, C ABI
 dynamic modules, three themes, bundled fonts. Known limitations that the owner presumably
-wants gone in swiftemacs: fixed character-grid GUI (no proportional/sub-cell layout, no
+wants gone in pellicle: fixed character-grid GUI (no proportional/sub-cell layout, no
 smooth scrolling, no minimap, no tab bar), synchronous remote editing, minibuffer keys not
 rebindable from Elisp, no define-derived-mode / syntax tables, no runtime grammar loading,
 no emacs-module ABI, Rc-based GC that can leak cycles, egui with no headless screenshot

@@ -1,4 +1,4 @@
-# swiftemacs
+# pellicle
 
 An Emacs-style editor for macOS in Swift: a native AppKit shell, a Metal text canvas, a
 persistent-rope text model, a homegrown Emacs Lisp engine (tagged values, own GC, bytecode

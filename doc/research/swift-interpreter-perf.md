@@ -144,7 +144,7 @@ interpreter (parser, GUI glue, LSP client, file I/O) can stay plain ARC Swift.
   the ABI-resilience overhead (opaque/indirect access patterns) that `public` API in a
   resilient library would otherwise pay. `@inlinable package` functions let
   `@usableFromInline package` symbols be inlined across module boundaries in the same
-  package. **Practical implication for swiftemacs**: split the interpreter into a few
+  package. **Practical implication for pellicle**: split the interpreter into a few
   modules (e.g. `LispCore`, `LispBuiltins`, `EditorCore`) inside one Swift package rather
   than one giant module, using `package`/`@inlinable package` for the hot cross-module
   calls (value construction, eval dispatch), to get WMO-like inlining without giving up

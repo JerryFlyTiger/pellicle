@@ -13,7 +13,7 @@ debugger/runtime. JSON-RPC-like messages over stdio (or a socket). Core requests
 `stackTrace`, `scopes`, `variables`, `evaluate`, `continue`/`next`/`stepIn`/`stepOut`,
 `disconnect`. The point of DAP is that an editor implements **one generic DAP client**
 and gets N debuggers for free; each debugger vendor implements one adapter and gets M
-editors for free. Spec is versioned (currently 1.71.0 per the site) — swiftemacs should
+editors for free. Spec is versioned (currently 1.71.0 per the site) — pellicle should
 target the stable subset and treat new capabilities as additive.
 
 **Adapter coverage per language (medium confidence — from the community adapters
@@ -44,7 +44,7 @@ lldb.llvm.org/use/tutorial.html):**
   editor to spawn it as a child process) and **socket** via
   `--connection listen://[host]:port` or `accept://path`.
 - `--launch-target` + `--comm-file` support "launch in terminal" (debuggee runs in a
-  real terminal the editor owns — relevant to swiftemacs since the app itself is meant
+  real terminal the editor owns — relevant to pellicle since the app itself is meant
   to double as a terminal per the owner's brief).
 - `--wait-for-debugger` (`-g`) pauses the debuggee at startup, useful for attach races.
 - `--repl-mode {variable,command,auto}` controls how the DAP `evaluate` request is
@@ -80,7 +80,7 @@ of **one general-purpose regex + a "does this path exist on disk" filter** to ki
 false positives, reasoning that new tools then require zero table maintenance. This
 worked for iverilog's four observed error shapes (`file:line:col-col:`,
 `file:line: error:`, `file:line: syntax error`, `file:line: sorry:`) but had two
-near-miss failures that are directly relevant to swiftemacs's design:
+near-miss failures that are directly relevant to pellicle's design:
 1. **Unbounded backtracking on external tool output can crash the whole editor
    process**, not just throw an error — Reticle's Rust regex engine did real function
    recursion on `.*`/`[^:\n]+` and **stack-overflow SIGABRT'd the process** on inputs
@@ -98,7 +98,7 @@ near-miss failures that are directly relevant to swiftemacs's design:
    used `forward-line`. This is worth calling out because column accuracy matters a lot
    for Verilog port-name-typo-class errors.
 
-**Recommendation for swiftemacs (this report's synthesis, high confidence on the
+**Recommendation for pellicle (this report's synthesis, high confidence on the
 architecture reasoning, since it's derived directly from a documented real failure):**
 **MUST** use Reticle's single-general-pattern approach (avoids a maintenance-heavy
 per-tool table) but **MUST also inherit its fix, not its original design** — cap the
@@ -162,8 +162,8 @@ README, both fetched):**
   **iframe embedding** with a documented `integration.js` API, and a client-server mode
   ("Surver") for remote waveform serving.
 - **The iframe/postMessage embedding path is the single most actionable finding for
-  swiftemacs**: rather than shelling out to a separate GUI app (GTKWave-style) or
-  reimplementing a waveform renderer from scratch, swiftemacs could embed Surfer's
+  pellicle**: rather than shelling out to a separate GUI app (GTKWave-style) or
+  reimplementing a waveform renderer from scratch, pellicle could embed Surfer's
   WASM build inside a `WKWebView` panel and drive it via `postMessage` — giving a
   native-feeling, first-party waveform pane without owning waveform-rendering code.
   This directly fixes one of Reticle's known limitations list items in spirit (no
@@ -193,7 +193,7 @@ Not independently re-fetched this session (VS Code tasks.json and Zed tasks.json
 both well-documented, low-risk-of-hallucination JSON schemas — declarative task list
 with `command`, `args`, `problemMatcher`/similar, `group` (build/test), keybinding to
 run). **Recommendation, consistent with the owner's brief that "the app itself should
-be a terminal like iTerm2":** swiftemacs's task runner MUST be built as a thin
+be a terminal like iTerm2":** pellicle's task runner MUST be built as a thin
 declarative layer *on top of* the same PTY/process-spawn machinery that powers the
 built-in terminal, not a separate subsystem — a "task" is just a named shell command
 plus an optional error-format hint, run in a terminal-tier pane. This both cuts
@@ -280,7 +280,7 @@ as supporting it on the official site).
 
 **Agent Client Protocol (ACP)** (high confidence, agentclientprotocol.com +
 github.com/zed-industries/agent-client-protocol): the complementary protocol, and the
-more directly relevant one for swiftemacs's architecture. ACP standardizes
+more directly relevant one for pellicle's architecture. ACP standardizes
 communication **between an editor (client) and a coding agent (a separate process)**
 over JSON-RPC, explicitly modeled on the LSP pattern ("one implementation, works with
 every compliant editor"). Local agents run as an editor subprocess over stdio; remote
@@ -289,7 +289,7 @@ representations used in MCP where possible" but adds agent-UX-specific types —
 structured **diff display** and (per the repo) permission-request flows. **Design
 intent stated directly on the site**: ACP assumes "the user is primarily in their
 editor, and wants to reach out and use agents to assist them," i.e., it is scoped to
-exactly the editor-hosts-agent shape swiftemacs needs, whereas MCP is a general
+exactly the editor-hosts-agent shape pellicle needs, whereas MCP is a general
 tool-serving protocol usable by *any* AI application, editor or not. Official SDKs
 exist for Kotlin, Java, Python, Rust, and TypeScript (no Swift SDK confirmed —
 **unverified**: whether a community Swift ACP client library exists; this report could
@@ -310,18 +310,18 @@ Code's own agent loop in your process; for other languages (Swift included), the
 documented path is **running the Claude Code CLI as a subprocess with `-p` (headless)
 and `--output-format json`** — i.e., a streaming-JSON-over-stdio subprocess protocol,
 which is exactly the transport shape ACP expects from a local agent. This is direct
-confirmation that **swiftemacs does not need Anthropic's cooperation to host Claude
+confirmation that **pellicle does not need Anthropic's cooperation to host Claude
 Code**: it can either (a) speak ACP if/when Claude Code ships an ACP server mode, or
 (b) drive the CLI directly via its own headless JSON subprocess protocol as a
 lower-level fallback. **Branding note (verified from the fetched page): Anthropic's
 terms explicitly disallow presenting a third-party integration as "Claude Code" or
-using Claude Code branding/ASCII art** — swiftemacs's Claude integration, if built,
+using Claude Code branding/ASCII art** — pellicle's Claude integration, if built,
 must use its own name/branding per Anthropic's stated terms, and per the same page,
 "Anthropic does not allow third party developers to offer claude.ai login... for their
 products" built on the Agent SDK, meaning **API-key auth, not consumer OAuth login, is
 the documented path for an SDK-based integration** (the CLI-subprocess path, run under
 the *user's own already-authenticated* Claude Code CLI install, sidesteps this — the
-user logs into their own copy of Claude Code, swiftemacs just shells out to it).
+user logs into their own copy of Claude Code, pellicle just shells out to it).
 
 **LSP inline completion:** not independently re-verified this session, but this is a
 standard, stable part of the Language Server Protocol (`textDocument/inlineCompletion`)
@@ -349,7 +349,7 @@ Foundation Models framework as unverified**, though macOS 26 is a reasonable inf
 given the owner's machine already runs macOS 26.6.2 with Apple Intelligence available).
 **Given the 3B-parameter size and explicit "not for advanced reasoning" guidance, the
 Foundation Models framework is not a credible substitute for a frontier coding agent**
-— its realistic role in swiftemacs is small on-device tasks (quick rewrite, comment
+— its realistic role in pellicle is small on-device tasks (quick rewrite, comment
 generation, simple classification/tagging) that must work with zero network egress,
 which is directly relevant to the IP-confidentiality constraint below, not a
 replacement for an ACP-hosted Claude/GPT-class agent for RTL work.
@@ -376,18 +376,18 @@ Models path (or a self-hosted/local-network model via an MCP or ACP server the c
 runs itself) a first-class, equally-supported option, not an afterthought bolted onto a
 cloud-first design. This is the strongest argument in this whole report for the
 ACP/MCP pluggable-backend architecture over any hard-coded vendor integration: an RTL
-shop can point swiftemacs at its own locally-hosted model server with zero editor code
+shop can point pellicle at its own locally-hosted model server with zero editor code
 changes if the AI layer is protocol-based rather than vendor-specific.
 
 ## B4. Recommended integration architecture
 
-Synthesizing B1-B3 and Zed's proof-of-concept: **MUST** — swiftemacs's core editing,
+Synthesizing B1-B3 and Zed's proof-of-concept: **MUST** — pellicle's core editing,
 compile/next-error, DAP, and waveform features (all of Section A) must work completely
 with AI disabled; AI is an optional layer, never a dependency of the hot path (matches
 the owner's brief's emphasis on performance/reliability, and matches Zed's own
 documented "turn AI off" design). **MUST** — implement an ACP client in the editor so
 any ACP-speaking agent (Zed's own agent, Claude Code if/when it exposes ACP, Gemini
-CLI, others) can be hosted in a side panel without swiftemacs hard-coding a vendor;
+CLI, others) can be hosted in a side panel without pellicle hard-coding a vendor;
 fall back to driving the Claude Code CLI directly via its documented headless
 `-p --output-format json` subprocess mode as a bridge until/unless native ACP support
 lands upstream. **SHOULD** — support MCP as the tool/context-source layer *underneath*

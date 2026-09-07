@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "swiftemacs",
+    name: "pellicle",
     platforms: [.macOS("26.0")],
     products: [
-        .executable(name: "swiftemacs", targets: ["App"]),
+        .executable(name: "pellicle", targets: ["App"]),
         .library(name: "SelfTestProbe", type: .dynamic, targets: ["SelfTestProbe"]),
     ],
     targets: [

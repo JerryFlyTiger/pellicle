@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/icon/swiftemacs-256.png" width="128" alt="">
+  <img src="assets/icon/pellicle-256.png" width="128" alt="">
 </p>
 
-<h1 align="center">swiftemacs</h1>
+<h1 align="center">pellicle</h1>
 
 <p align="center">
 An Emacs-style editor for macOS, written in Swift.
@@ -56,8 +56,8 @@ which `dev/make-app-bundle.sh` calls to compile the icon.
 
 ```sh
 dev/gate.sh              # lint, debug build, release build, tests — the definition of done
-dev/make-app-bundle.sh   # .build/swiftemacs.app, ad-hoc signed, hardened runtime
-open .build/swiftemacs.app
+dev/make-app-bundle.sh   # .build/pellicle.app, ad-hoc signed, hardened runtime
+open .build/pellicle.app
 ```
 
 Every claim about what the GUI looks like is settled by a rendered image, never by reading

@@ -1,6 +1,6 @@
 # JIT compilation for an Elisp engine on macOS / Apple Silicon: feasibility and value
 
-Topic key: `jit-on-macos` — planning research for swiftemacs, 2026-09-05.
+Topic key: `jit-on-macos` — planning research for pellicle, 2026-09-05.
 Author: research agent (Fable 5.1). Environment facts were verified on the owner's machine
 (macOS 26.6.2, Apple M4, Xcode 26.6 / Swift 6.3.3, macOS 26 SDK). Every claim carries a
 confidence tag: **[verified]** = primary source read or reproduced locally; **[high]** =
@@ -112,7 +112,7 @@ Design facts from `jit.rs`:
   operate on tagged Values and keep…" (L515-520), i.e. the JIT would inherit exactly the
   costs that make `fib` 1.0x.
 
-**Lessons for swiftemacs:**
+**Lessons for pellicle:**
 
 1. The 575x number measures the *absence of value boxing and dispatch* on a loop with no
    calls. Real Elisp always calls. The VM's call path (`funcall`, arg passing, frame push,
@@ -120,7 +120,7 @@ Design facts from `jit.rs`:
    it is fixable in the VM.
 2. Reticle's JIT could not be widened cheaply because its **value representation** (an
    `Rc`-based enum) and its **error model** (re-run) were not designed for native code.
-   Whatever swiftemacs chooses for values and errors in stage 1 determines whether a JIT is
+   Whatever pellicle chooses for values and errors in stage 1 determines whether a JIT is
    ever possible; that decision is the JIT decision.
 3. A JIT that can't be interrupted, can't be profiled and can't be stepped through is a
    support burden — Reticle documented all three.
@@ -226,7 +226,7 @@ design for a single reservation regardless; (c) `unsafeBitCast` to a
   notarization-issues page rejects is `get-task-allow` ([Apple: Resolving common
   notarization issues](https://developer.apple.com/documentation/security/resolving-common-notarization-issues)). `allow-jit` is a normal Hardened Runtime exception and is what Chrome/Electron/JSC-hosting apps ship with. [high for the requirement, medium for "allow-jit is accepted" — inferred from the entitlement being an official runtime exception and from Electron/electron-builder documentation, not from a page saying "notarization accepts allow-jit"]
 - Mac App Store: electron-builder's notarization docs state MAS builds embedding V8 need
-  `allow-jit` together with the sandbox ([electron.build](https://www.electron.build/docs/features/code-signing/notarization/)). [medium] There is an open Apple Forums thread (2026) reporting a deterministic `EXC_BREAKPOINT` on **macOS 26 + App Sandbox + arm64** when V8 flips pages with `mprotect`, working on macOS 15.x and on macOS 26 without sandbox; Apple DTS replied that guidance is unchanged and pointed at the porting guide ([forums thread 821584](https://developer.apple.com/forums/thread/821584)). Relevance: if swiftemacs is ever sandboxed, use the pthread toggle/callback API, never `mprotect`, and test on the shipping OS. [high that the thread exists and says this; low on the root cause]
+  `allow-jit` together with the sandbox ([electron.build](https://www.electron.build/docs/features/code-signing/notarization/)). [medium] There is an open Apple Forums thread (2026) reporting a deterministic `EXC_BREAKPOINT` on **macOS 26 + App Sandbox + arm64** when V8 flips pages with `mprotect`, working on macOS 15.x and on macOS 26 without sandbox; Apple DTS replied that guidance is unchanged and pointed at the porting guide ([forums thread 821584](https://developer.apple.com/forums/thread/821584)). Relevance: if pellicle is ever sandboxed, use the pthread toggle/callback API, never `mprotect`, and test on the shipping OS. [high that the thread exists and says this; low on the root cause]
 - A libgccjit-style design (compile to `.eln` dylibs and `dlopen` them) is *worse* on
   macOS than in-process `MAP_JIT`: Hardened Runtime's library validation rejects code not
   signed by the same Team ID or Apple, so each generated dylib would have to be signed with
@@ -329,7 +329,7 @@ targets 20% on the free-threaded build by 3.17. The March 2026 write-up credits 
 trace recording across bytecodes and reference-count-branch elimination, i.e. to
 *optimization*, not to the template mechanism ([mathewsachin blog](https://mathewsachin.github.io/blog/2026/03/18/python-jit-finally-fast.html), [medium]).
 
-For swiftemacs: the mechanism assumes the interpreter's op handlers are C functions
+For pellicle: the mechanism assumes the interpreter's op handlers are C functions
 compiled by Clang with `preserve_none`/`musttail`. Swift has neither guaranteed tail calls
 nor `preserve_none`; the stencils would have to be a C reimplementation of every VM op,
 duplicating the Swift VM. A SwiftPM build-tool plugin could run the stencil extractor, but
@@ -392,7 +392,7 @@ or, when unavailable, a separate writable remap of the same physical pages
   on macOS I could **not** confirm from the docs (JITLink docs don't mention it; the ORCv2
   summary I received claimed it does but I could not see the sentence) — see §12.
 - **Verdict:** enormous binary, build and notarization surface for a code generator whose
-  speed we do not need; only sensible if swiftemacs also wanted an AOT path for Elisp
+  speed we do not need; only sensible if pellicle also wanted an AOT path for Elisp
   packages. Not recommended. [medium]
 
 ### 6.5 libgccjit (Emacs's choice)
@@ -489,7 +489,7 @@ Complaints (all **[high]** that they were reported; [medium] on prevalence):
 
 The local Emacs 30.2 (`/opt/homebrew/bin/emacs`) reports `NATIVE_COMP` in
 `system-configuration-features` **[verified]** — useful as a comparison baseline for the
-benchmark suite, and a reminder that swiftemacs will be compared against native-comp'd
+benchmark suite, and a reminder that pellicle will be compared against native-comp'd
 Emacs, not against the byte-code interpreter.
 
 ---

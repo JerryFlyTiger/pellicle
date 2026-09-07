@@ -1,6 +1,6 @@
 # GNU Emacs pain-point inventory and what Emacs 29–31 did about them
 
-Research report for the swiftemacs planning run. Date: 2026-09-05.
+Research report for the pellicle planning run. Date: 2026-09-05.
 Scope: every widely reported GNU Emacs pain point, its root cause, what upstream did in
 Emacs 29/30/31, whether a from-scratch implementation can fix it *by design*, and the design
 that fixes it. This is the spec behind the owner's requirement "solve every well-known pain
@@ -38,7 +38,7 @@ MPS-based GC ("igc") — **was explicitly excluded from Emacs 31** on 2026-04-30
 lives on `feature/igc3` as of August 2026 [H]. Multithreading has no path forward on
 emacs-devel beyond thread-local point/narrowing proposals [H].
 
-**Conclusion for swiftemacs:** all five root decisions are fixable by design in a new
+**Conclusion for pellicle:** all five root decisions are fixable by design in a new
 implementation *provided the Elisp compatibility contract is defined narrowly enough*:
 per-buffer actors with a single UI actor, a generational/incremental GC or ARC+cycle
 collector with bounded pauses, a real layout engine instead of a character grid, a modern
@@ -242,7 +242,7 @@ This is the same reason remacs-style incremental rewrites stalled [M].
   iterator special cases.
 - Reticle's lesson in reverse: its "single screen-grid redisplay model shared by both
   front ends" is exactly what precluded "proportional/sub-cell layout, smooth scrolling,
-  minimap" [H, CONTEXT.md; Reticle README limitations]. swiftemacs has no TUI, so it does
+  minimap" [H, CONTEXT.md; Reticle README limitations]. pellicle has no TUI, so it does
   not need a grid at all.
 - Headless render-to-image path for tests (Reticle: "egui has no headless screenshot
   pipeline to assert against" cost it repeated eyeballing incidents) [H, Reticle README/
@@ -740,7 +740,7 @@ functions without budget or attribution; the mode line is recomputed every redis
 |---|---|---|
 | No package sandbox/security | "every package you install runs arbitrary Lisp with your full privileges" [M] | capabilities + trust prompts (§10) |
 | Crashes from fonts/fringes on macOS | Doom FAQ [H] | native text stack (§17), no fringe hacks |
-| Lossy/legacy string model burdens rewrites | Emacs chars up to `#x3FFFFF`, CCL, case tables [H, kyo.iroiro.party] | define swiftemacs strings as Unicode scalars + raw-byte escapes; do not emulate CCL |
+| Lossy/legacy string model burdens rewrites | Emacs chars up to `#x3FFFFF`, CCL, case tables [H, kyo.iroiro.party] | define pellicle strings as Unicode scalars + raw-byte escapes; do not emulate CCL |
 | Dynamic binding blocks parallelism | "Dynamic binding is a big blocker for multithreading" [M, HN] | lexical binding default (Reticle did this [H]); dynamic bindings thread-local |
 | No automated tests culture in packages | "automated tests ... never gained much traction in the Emacs community" [H, Batsov] | ship a test runner and headless render in the SDK |
 | Emacs survey lacks pain-point data | 2022 survey (~7 000 responses) published demographics only; pain analysis "to come later" and was not found [H, EmacsConf 2022] | — (do not cite the survey for pain points) |
@@ -760,7 +760,7 @@ functions without budget or attribution; the mode line is recomputed every redis
 8. **Observability built in** (latency attribution, GC telemetry, advice introspection).
    Fixes §22 and prevents the config-tuning folklore of §2/§4.
 
-The compatibility boundary to state up front: swiftemacs runs *its own* Elisp dialect
+The compatibility boundary to state up front: pellicle runs *its own* Elisp dialect
 (lexical by default, actor-aware, async primitives, rich events). GNU packages are a
 porting target, not a runtime target — the same stance Reticle took, and the only stance
 under which every item above is fixable.

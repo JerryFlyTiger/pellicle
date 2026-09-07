@@ -2,7 +2,7 @@
 // belonging to a process whose name contains the argument, case-insensitively.
 //
 // Used by dev/gui-shot.sh. This exists because the obvious route -- asking
-// System Events for `window 1 of process "swiftemacs"` -- needs Accessibility
+// System Events for `window 1 of process "pellicle"` -- needs Accessibility
 // permission, and returns a bare index error when it is missing, which reads
 // like "the app has no window" rather than "you lack permission".
 // CGWindowListCopyWindowInfo returns owner name and bounds without any

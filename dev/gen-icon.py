@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Generate the swiftemacs app-icon artwork.
+"""Generate the pellicle app-icon artwork.
 
     dev/gen-icon.py
 
 Writes, relative to the repository root:
 
-    assets/icon/swiftemacs.icon/Assets/whole.svg   the icon's single layer
-    assets/icon/swiftemacs-flat.svg                one flat file for docs/web
+    assets/icon/pellicle.icon/Assets/whole.svg   the icon's single layer
+    assets/icon/pellicle-flat.svg                one flat file for docs/web
 
-`assets/icon/swiftemacs.icon/icon.json` is *not* generated: it is the Icon
+`assets/icon/pellicle.icon/icon.json` is *not* generated: it is the Icon
 Composer document proper (gradient, per-group glass and shadow), hand-authored
 and read back here so the flat file cannot drift from the real icon's colours.
 `dev/make-app-bundle.sh` compiles the package with actool.
@@ -82,7 +82,7 @@ import os
 
 N = 240  # samples per centreline
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICONPKG = os.path.join(ROOT, "assets", "icon", "swiftemacs.icon")
+ICONPKG = os.path.join(ROOT, "assets", "icon", "pellicle.icon")
 
 
 # ------------------------------------------------------------------ geometry
@@ -324,7 +324,7 @@ write(os.path.join(ICONPKG, "Assets", "whole.svg"),
       BODY % (SPAN, p3_hex_of(stops[0]), p3_hex_of(stops[1]),
               path_data([canvas_rect()]), path_data(par), path_data(lam)))
 
-write(os.path.join(ROOT, "assets", "icon", "swiftemacs-flat.svg"),
+write(os.path.join(ROOT, "assets", "icon", "pellicle-flat.svg"),
       BODY % ('x1="0" y1="0" x2="0" y2="1"', top, bottom,
               path_data([squircle()]), path_data(par), path_data(lam)))
 

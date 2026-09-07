@@ -1,4 +1,4 @@
-# Editor core data structures for swiftemacs (buffer, markers, intervals, undo, multi-cursor, huge files)
+# Editor core data structures for pellicle (buffer, markers, intervals, undo, multi-cursor, huge files)
 
 Status: sections below are final as written; report complete except any items explicitly marked "unverified."
 
@@ -27,7 +27,7 @@ anything not confirmed against a primary source in this run is explicitly called
 
 ## 1. Requirements recap
 
-swiftemacs' buffer engine must simultaneously satisfy:
+pellicle's buffer engine must simultaneously satisfy:
 
 - **Multi-MB generated Verilog** (wide, deeply nested, often single very long lines from
   tool-generated netlists) and **GB-scale logs** — both edit-rare, read/scroll-heavy.
@@ -56,7 +56,7 @@ swiftemacs' buffer engine must simultaneously satisfy:
 | **Piece table (+ index tree)** | O(log n) with a balanced index tree (VS Code uses a red-black tree over pieces); original file buffer is **never mutated**, only appended-to edit buffer(s) | O(log n) via subtree metadata (VS Code: "Each node maintains metadata about its left subtree's text length and line-break count" — high confidence, VS Code blog) | Fine for read: a long line is one or few pieces; bad after many small edits inside one long line (fragmentation → many tiny pieces, each a red-black node) | Original buffer is naturally read-only and mmap-able; edit buffer append-only, so background readers can safely read the original+immutable edit log while UI appends | Very low: "piece tree approached the original file size" vs ~20x for the old line-array model on a 184MB file (high confidence, VS Code engineering blog) | VS Code `PieceTreeTextBuffer` |
 | **Persistent/immutable snapshot (functional data structure, often a rope or a CRDT-backed rope)** | Same asymptotics as the underlying tree (rope: O(log n)); the key property is that **taking a snapshot is O(1)** (share the root) | O(log n) | Same as rope | This *is* the mechanism for lock-free background reads: a `BufferSnapshot` is an immutable value that can be captured by a background thread while the UI thread keeps editing the live buffer; Zed's `Anchor`+`BufferSnapshot` model is built exactly for this (high confidence, Zed `anchor.rs`/`text.rs` via WebFetch) | Same as rope, plus GC/CoW pressure from retained old versions if held too long | Zed's `text::Buffer` (CRDT fragments over a rope), xi-editor's original CRDT design |
 
-**Recommendation driver**: swiftemacs' hardest constraint is not any single one of these rows —
+**Recommendation driver**: pellicle's hardest constraint is not any single one of these rows —
 it is "GB-scale mostly-read files" *and* "background parse/LSP/search threads" *and*
 "very long lines" *and* "many cursors" all at once. A gap buffer (Reticle's/Emacs's choice)
 fails the concurrent-read requirement structurally (one mutable array, no cheap snapshot) and
@@ -65,7 +65,7 @@ Emacs's actual gap buffer only moves data between the gap and the edit point —
 sub-line locality). A **rope with per-leaf summaries, exposed as immutable persistent
 snapshots**, is the only structure in this table that satisfies all four constraints
 simultaneously, which is why Zed — the newest of the reference systems and the one with the
-closest requirements to swiftemacs' (GPU-rendered, LSP+tree-sitter, multi-cursor, CRDT-ready
+closest requirements to pellicle's (GPU-rendered, LSP+tree-sitter, multi-cursor, CRDT-ready
 for future collab) — converged on exactly this shape. **Must: rope + immutable snapshots as
 the core buffer.**
 
@@ -89,14 +89,14 @@ only when editing begins or the file is small.
   per general knowledge; not re-fetched from microsoft/language-server-protocol in this run,
   flagged as **unverified in this session** even though it is a well-known, stable part of the
   spec). Since verible-verilog-ls / slang-server / pyright / clangd / sourcekit-lsp support is
-  not guaranteed to negotiate UTF-8 positions, **swiftemacs must maintain a UTF-16 length
+  not guaranteed to negotiate UTF-8 positions, **pellicle must maintain a UTF-16 length
   summary regardless of storage encoding.**
 - **Zed's approach, confirmed via source fetch**: `TextSummary` carries `len` (UTF-8 bytes),
   `len_utf16` (UTF-16 code units), and `lines: Point` (row/column), plus per-summary
   first-line/last-line character counts and a longest-row tracker for line-wrap width
   estimation — all propagated up the B+ tree so any subtree's summary is O(1) to read and
   O(log n) to update (high confidence, Zed `rope.rs`/`sum_tree.rs` via WebFetch).
-- **Recommendation for swiftemacs (must)**: each rope leaf/chunk summary should carry, at
+- **Recommendation for pellicle (must)**: each rope leaf/chunk summary should carry, at
   minimum: `{utf8ByteCount, utf16CodeUnitCount, newlineCount, firstLineByteCount,
   lastLineByteCount, maxLineByteCount}`. This gives O(log n) conversions in all directions
   needed by the three consumers (tree-sitter: byte offsets; LSP: UTF-16 `Position`; UI: line
@@ -124,7 +124,7 @@ only when editing begins or the file is small.
   markers, it can take too much time to find a 'good' marker... The asymptotic behavior is
   still poor, tho, so in largish buffers with many overlays (e.g. 300KB and 30K overlays), it
   can still be a bottleneck."* This is a **known, self-documented Emacs pain point** directly
-  relevant to swiftemacs' "solve Emacs's pain points" mandate: linear/near-linear marker
+  relevant to pellicle's "solve Emacs's pain points" mandate: linear/near-linear marker
   adjustment degrades once overlay/marker counts get large (diagnostics + folds + breakpoints
   + AUTO-region markers in a big Verilog file can easily reach tens of thousands).
 - **Zed anchors (confirmed via source fetch, `crates/text/src/anchor.rs`)**: an `Anchor` is
@@ -136,7 +136,7 @@ only when editing begins or the file is small.
   fragment's visibility state. This makes anchors **cheap, `Sendable`-like, immutable values**
   that can be freely copied to background threads and resolved against whatever snapshot that
   thread holds — a fundamentally different design from Emacs's live-adjusted marker list.
-- **Design implication for swiftemacs (must)**: adopt the **Zed-style anchor**, not the
+- **Design implication for pellicle (must)**: adopt the **Zed-style anchor**, not the
   Emacs-style marker, as the base primitive: a `struct Anchor: Sendable, Hashable` holding a
   logical position (chunk-relative or a monotonic edit-sequence timestamp + offset-within-edit)
   and a bias, resolved against an immutable `BufferSnapshot` on demand (O(log n) resolution,
@@ -149,7 +149,7 @@ only when editing begins or the file is small.
   named project in this run — **unverified**) keep markers in a secondary interval/order-
   statistics tree keyed by an ever-increasing logical clock rather than by raw offset, so that
   marker adjustment on edit is O(log n) instead of O(list length); this is essentially "give
-  markers the same tree-summary treatment as text." For swiftemacs this is subsumed by the
+  markers the same tree-summary treatment as text." For pellicle this is subsumed by the
   anchor approach above and is not separately necessary as a first cut.
 
 ## 5. Text properties / overlays as interval trees (Emacs 29 itree; Zed DisplayMap layers)
@@ -164,12 +164,12 @@ only when editing begins or the file is small.
   still O(N) because the tree orders by BEGIN only, not END, and the fix (tracking both
   orderings) is an open item referenced as bug#58342 in Emacs's own tracker (high confidence —
   direct quotes from `src/itree.c` via WebFetch).
-- **Recommendation (must)**: implement swiftemacs's text-property/overlay store as an
+- **Recommendation (must)**: implement pellicle's text-property/overlay store as an
   **augmented interval tree with a LIMIT/max-end summary**, i.e. do what Emacs 29 already
   did, but additionally track a **max-of-END** summary on both children (not just one
   direction) from day one, so "nearest overlay boundary" queries (needed for cheap
   fold-boundary and diagnostic-squiggle-boundary lookups while scrolling) are O(log N)
-  instead of inheriting Emacs's still-open O(N) gap. Since swiftemacs's rope leaves already
+  instead of inheriting Emacs's still-open O(N) gap. Since pellicle's rope leaves already
   carry per-chunk summaries (§3), the natural implementation is to make the interval tree
   **another dimension on the same `SumTree`-shaped generic structure** (see §11) rather than
   a hand-rolled separate red-black tree — one generic augmented-tree type serving both text
@@ -216,7 +216,7 @@ only when editing begins or the file is small.
   transactions**, and **undo as inverse-operation replay against the persistent rope**
   (insert's inverse is delete-at-same-anchor-range, delete's inverse is
   insert-the-deleted-text-back), rather than storing full pre/post buffer snapshots. Because
-  swiftemacs's rope is persistent (§2), an even simpler and very cheap alternative exists and
+  pellicle's rope is persistent (§2), an even simpler and very cheap alternative exists and
   should also be considered (**should**): keep a bounded ring of **whole-rope root pointers**
   (snapshots) as undo checkpoints — since the rope is a persistent tree, retaining an old root
   costs O(1) plus the cost of *not* garbage-collecting the nodes only that old version
@@ -261,7 +261,7 @@ only when editing begins or the file is small.
 ## 8. Line wrapping / display maps for very long lines; incremental line/column caches
 
 - Covered structurally in §5 (Zed's `WrapMap`/`TabMap` as independent `SumTree` layers). The
-  specific hazard for swiftemacs's stated workload (multi-MB generated Verilog, which often
+  specific hazard for pellicle's stated workload (multi-MB generated Verilog, which often
   has very long single lines from tool output, and GB logs) is **not the wrap computation
   itself but *finding* long lines cheaply**: if a "which rows need wrapping" query has to scan
   the whole buffer, opening a GB log with a single 50MB line embedded somewhere stalls the UI.
@@ -279,14 +279,14 @@ only when editing begins or the file is small.
 
 ## 9. CRDT (only if cheap)
 
-- swiftemacs has no stated collaborative-editing requirement in the brief — CRDT support is
+- pellicle has no stated collaborative-editing requirement in the brief — CRDT support is
   explicitly "only if cheap." The finding from this research: **Zed's fragment-based CRDT
   rope is not an add-on bolted onto a plain rope — the undo model (§6), the anchor model
   (§4), and the concurrent-snapshot model (§2) are *already* CRDT-shaped** even in
   Zed's single-user path (Lamport clocks, per-fragment visibility counts, `Global` version
   vectors are all present in `crates/text/src/text.rs` regardless of whether collaboration is
   active — confirmed via source fetch). This suggests the "cheap" version of CRDT support for
-  swiftemacs is: **build the local single-user engine on the same primitives a CRDT would need
+  pellicle is: **build the local single-user engine on the same primitives a CRDT would need
   anyway** (immutable anchors, transaction log with Lamport-like monotonic edit ids, snapshot
   isolation) **without implementing multi-replica merge logic**, so that *if* real-time
   collaboration is ever wanted later, the buffer core doesn't need a rewrite — only a merge/
@@ -301,7 +301,7 @@ only when editing begins or the file is small.
 - **VS Code's own numbers (confirmed via source fetch)**: switching from a line-array text
   model to the piece-tree model dropped memory for a 184MB file from roughly **20x the file
   size to "approached the original file size"** — a concrete, citable data point for why
-  swiftemacs should never materialize "one array/object per line" for GB-scale files.
+  pellicle should never materialize "one array/object per line" for GB-scale files.
 - **mmap for read-only huge files**: Foundation's `Data(contentsOf:options:.mappedIfSafe)`
   memory-maps the file when safe to do so and falls back to a normal read otherwise — this is
   **medium confidence, general Apple-platform knowledge**, explicitly **not confirmed against
@@ -535,7 +535,7 @@ in this research pass** (out of scope/budget for this agent).
   BEGIN is tree-ordered, not END — track both from the start (§5).
 - **VS Code's own documented pitfall**: heavy in-place editing fragments a piece table into
   "thousands or tens of thousands of nodes," degrading random line access — motivates choosing
-  a rope (which rebalances) over a piece table for swiftemacs's edit-heavy Verilog use case,
+  a rope (which rebalances) over a piece table for pellicle's edit-heavy Verilog use case,
   reserving piece-table-like append-only buffers only for the read-only mmap tier (§2, §10).
 - **This machine's own measured pitfall**: naive recursive ARC teardown of a large linked
   value (1M-node list) segfaults (stack overflow, exit 139) on both tested representations;
