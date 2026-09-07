@@ -1392,6 +1392,136 @@ Does not block anything.
 *Amended 2026-09-07:* the icon gap this section recorded is closed early, out of milestone
 order, at the owner's request; see the icon record below.
 
+### M1.1 Rope -- done 2026-09-08
+
+The persistent B+-tree rope of 4.5: `TextSummary` (the monoid), `Chunk` (up to 64 bytes of
+UTF-8 stored inline), `SumTree` (generic over `Item: Summable`, because M1.4's interval tree
+is its second instance), `Rope` (byte-indexed, value-semantic, `Sendable`, O(1) snapshot by
+struct copy). Gate: `Test run with 64 tests in 13 suites passed`, all stages.
+
+**Deviations from 4.5's sketch.** `TextSummary` carries a seventh field, `scalars` (Unicode
+scalars == Emacs character positions); the sketch lists only utf8/utf16/lines/firstLineLen/
+lastLineLen/maxLineLen, but Emacs buffer positions count characters, not UTF-16 units, so M5
+needs it and adding it later would mean recomputing every leaf summary in the project.
+`Chunk` caches its own summary packed into seven `UInt8`s (stride 65 -> 72); storing a
+`TextSummary` instead was measured and takes stride to 128 through alignment padding.
+
+**`B = 6` is now measured rather than inherited from Zed.** A rebuild copies a whole node, so
+cost per level grows linearly in `B` while levels fall only as `1/log B`; the rebuild cost is
+`~2B*log_B(n)`, minimised analytically near `B = e` and empirically at 4-6. Single-byte
+insert into 1 MB at B = 2/4/6/8/12/16/32: 64/108/128/218/270/617/2008 us. A scan-heavy
+workload (whole-buffer iteration, tree-sitter feeding) would argue the other way, so re-run
+the sweep with an iteration benchmark before ever changing it.
+
+**Performance.** `isScalarBoundary` went 23-29 us -> **0.39 us** on a 1 MB rope once it was
+rewritten onto a read-only descent (`SumTree.find`) that allocates, copies and rebuilds
+nothing. The *edit* path is unchanged and a single-byte insert into 1 MB still costs ~115 us:
+`splitNode`/`cutNode` call `buildFromNodes` at every level of the descent and
+`buildFromNodes` folds `concat` across up to `B+1` siblings, so they are O(B*h^2), not the
+O(log n) the original doc comments claimed. That is **M1.1b**, designed and not started: a
+path-copy edit (descend once, rebuild the `h+1` nodes on the path, propagate a sibling only
+on overflow), prototyped by the architect review at **1.5 us**, with a `Fragment` +
+`TreeBuilder` n-ary join for edits that genuinely span leaves. The obstruction that looked
+fatal -- a per-level group of `k < B` nodes cannot become a well-formed node -- dissolves if
+underfull is representable only as a transient *argument* to the join and never as a stored
+node, which leaves `checkInvariants()`'s assertions exactly as they are. Its hard half is
+deletion's underflow repair (borrow-from-sibling or merge-with-sibling per level).
+
+## What five reviews and three mutation passes found after the gate was already green
+
+Every defect below was found *after* `dev/gate.sh` passed. That is the point of the loop.
+
+1. **The property tests were degenerate -- the worst defect, and one no gate could show.**
+   The delete and replace cases drew a range between two independent uniform boundaries,
+   removing ~n/3 per operation against inserts of ~2.4 bytes at 2-in-5 frequency, so the size
+   random walk collapsed. Measured over the model's exact trajectory: the rope reached a
+   **maximum of 49 bytes**, averaged 9, and spent 57% of operations under ten bytes; its root
+   height never exceeded 0, so every `checkTreeInvariants()` call in the default suite ran
+   against a single leaf. Section 8's headline M1 condition -- property tests over 1,000,000
+   random edits -- performed essentially all of them on a rope of about nine bytes.
+   **The rule this earns: a randomised test must assert its own non-degeneracy, or it reports
+   success for free.** A size *cap* was specified and delivered; nobody asked what the
+   distribution actually did.
+2. **Fixing that produced two more of the same defect, in new shapes.** First a floor guard
+   was added, which stopped the collapse but pinned the walk to its floor (excursion of 46
+   bytes across a nominal 56 KB band) and cost the randomised suite all small-rope coverage,
+   flipping it from "only tests tiny ropes" to "only tests large ones". Then the replacement
+   non-degeneracy assertions were **tautologies**: `minModelSize` was initialised before the
+   loop and only ever decreased, so it could never exceed `initialSize` -- `minModelSize <=
+   8192 + 32` was unconditionally true for a band whose floor *was* 8192, and would have
+   passed even if the floor guard were broken. Both were caught by cold reviewers, not by me.
+   The settled form is two bands (a small one with no floor, 0-512 bytes, that visits the
+   empty rope and the height 0->1 transition; a large one, 8-64 KB, that reaches height 2)
+   and an **oscillation** property -- the minimum observed *after* the maximum was reached
+   must fall to at most half of it. That one is falsifiable and was falsified: reverting the
+   tuning fails it with "min size after max 47471 did not fall to at most half of max 53971".
+3. **`rewrap`'s rebalancing overflow branch was live code no test reached.** Instrumented: 0
+   hits across the whole `sumTreeTests` suite, 0 across the randomised model test, 286 inside
+   the fragmentation guard -- which never called `checkInvariants()`. It is reachable (171
+   hits across 3,000 rounds of random `append`/`insert` of randomly-*sized* ropes) and the
+   checker does catch corruption there, but every existing test concatenated only equal-sized
+   or single-item trees. Now covered by a deterministic test that reaches the branch in one
+   operation and a randomised one that reaches it by volume.
+4. **Invariant-check cadence is load-bearing, measured.** Because the `concat`-everywhere
+   rebuild re-folds neighbours, a malformed node is *self-healing* -- it survives ~0.26
+   operations. With `rewrap` mutated to split `1/rest`: checking after every one of 20,000
+   inserts catches 80 violations, every 50 ops catches 2, every 1,000 ops catches **0**. A
+   mutation checklist that says "run the model test" reports a false pass. The default tier
+   now checks after every operation, which is most of why it costs ~17 s.
+5. **`find` had zero coverage after being added.** Two mutations proved it: `findNode`
+   returning the post-item prefix, and `Rope.locate`'s predicate off by one, both survived the
+   entire suite. `find` had one call site, `locate` had one caller, and that caller
+   (`isScalarBoundary`, public API) was never called by any test.
+6. **`checkInvariants()` had no negative test.** Mutations deleting its leaf lower-bound check
+   and its empty-leaf check both survived. Everything trusted the checker; nothing checked it.
+7. **Three doc comments asserted false things.** `split`/`cut`/`concat` were documented "all
+   O(log n)" when they are O(B*h^2); `Rope.locate` claimed "never materialising the preceding
+   chunks" while rebuilding both sides; and `MemoryLayout<Node<Chunk>>.stride` was documented
+   as 24 when it is 72. **That last number came from the main conversation's own verification
+   probe**, which used `Int` as the summary type instead of the real 56-byte `TextSummary`,
+   and travelled from the spec into a code comment. *A fact checked against a simplified
+   stand-in is not a checked fact.*
+8. **A benchmark harness without `-wmo` is not measuring the shipping configuration.** The
+   main conversation's first numbers were 2-3x pessimistic: `swift build -c release` passes
+   `-whole-module-optimization` and `swiftc -O` alone does not, and `dev/spikes/RESULTS.md:30`
+   had already recorded `-O -wmo` as the protocol. Worse, **`swift test` builds in debug**, so
+   the perf suite's original numbers measured unoptimised code entirely. The perf tier is now
+   gated on release as well as on `PELLICLE_PERF`.
+9. **A ratio assertion alone is the wrong shape for a performance test.** `scalingRatio`
+   asserted only that per-edit cost across three decades of `n` grew by less than 8x. It
+   passed comfortably at 3.7x while every operation was ~100x too slow, because the cost was
+   dominated by a size-independent constant -- **a uniformly slow implementation has an
+   excellent ratio.** It now carries an absolute floor too. The same trap recurred one level
+   up when the band bar was set to exactly the value the walk reached (32768 against a bar of
+   32768, a pass by zero bytes); the bar is now 24 KB, and its comment states what it does and
+   does not prove rather than being tuned a third time.
+
+**Defences that cannot be observed, recorded rather than faked** (CLAUDE.md's rule). Removing
+`concatNodes`'s empty short-circuit changes no result -- it is a performance guard, not a
+correctness one. Loosening `packChunks`'s backoff floor changes nothing for valid UTF-8, since
+a non-final chunk is always exactly 64 bytes wide before backoff and a scalar is at most 4.
+`checkInvariants`'s empty-leaf check is strictly subsumed by its lower-bound check. `locate`'s
+`>` vs `>=` is indistinguishable *through `isScalarBoundary`*, which filters both endpoints
+before calling it -- though the two genuinely diverge at `byteOffset == utf8Count`, so the
+equivalence belongs to the caller, not the predicate. The `cutNode` and `findNode`
+preconditions cannot be reached by any current caller. Note for future mutation work: those
+two preconditions make "force the predicate true to manufacture a non-nil result" an unusable
+technique against either function's interior recursion -- it crashes the process instead of
+failing a test.
+
+**Declined, with reasons.** The edit-path rewrite is deferred to M1.1b rather than folded in
+here, so that the test defences above landed *before* the rewrite that will stress them -- the
+architect's staging, and the reason the `rewrap` coverage exists at all. The 24 KB bar is
+cleared by a single 20,000-byte paste in ~98% of runs and so evidences an excursion rather
+than a traversal; it was kept and documented rather than re-tuned, because a bar picked until
+it barely passes is the defect this sub-milestone is about.
+
+**Known gaps.** `Rope(String)` for 1 MB takes ~11 ms (~91 MB/s) because `SumTree.build` halves
+recursively through `concat`; a 10 MB file would spend 110 ms in construction before anything
+else happens, so M1.2 wants a bottom-up bulk loader. No character/UTF-16/line conversion API
+(M1.2), no marker tree (M1.3), no interval tree (M1.4), no undo (M1.5), no line-indexed mmap
+view for huge read-only files.
+
 ---
 
 ## Icon, 2026-09-07 (out of milestone order, at the owner's request)
@@ -1904,8 +2034,10 @@ observations and not a rule.
 
 - `git init` done; two commits per milestone as `CLAUDE.md` prescribes. M0 is built and its
   record is in section 11.
-- Next work item: **M1.1 rope** (section 8's M1 family), then the rest of M1 one sub-
-  milestone at a time through the loop in `CLAUDE.md`.
+- Next work item: **M1.1b**, the rope's edit path (path-copy plus a `Fragment`/`TreeBuilder`
+  n-ary join), designed in the M1.1 record above and not started; then M1.2 onward, one sub-
+  milestone at a time through the loop in `CLAUDE.md`. *(This line said "M1.1 rope" until
+  2026-09-08; M1.1 is done and its record is in section 11.)*
 - The owner asked that the implementation sessions run on **opus** (the planning session
   ran on Fable and was judged too expensive) and that "which approach" decisions be made
   without asking.
