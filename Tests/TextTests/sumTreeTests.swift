@@ -1,0 +1,358 @@
+import Testing
+
+@testable import Text
+
+/// A trivial `Summable`/`Summary` pair so these tests can exercise `SumTree<Item>` without
+/// going through `Chunk`/`TextSummary` — the generic tree's invariants should hold for any
+/// item type, and keeping this fixture separate from the rope's own types means a bug in
+/// one cannot mask a bug in the other.
+private struct IntSummary: Summary {
+    var count: Int
+    static let identity = IntSummary(count: 0)
+    static func + (lhs: IntSummary, rhs: IntSummary) -> IntSummary {
+        IntSummary(count: lhs.count + rhs.count)
+    }
+}
+
+private struct IntItem: Summable {
+    typealias Item_Summary = IntSummary
+    var value: Int
+    var summary: IntSummary { IntSummary(count: 1) }
+}
+
+/// Covers `SumTree`'s structural invariants: fill bounds, uniform depth, cached-summary
+/// correctness, and persistence under edits (PLAN.md 4.5).
+@Suite("SumTree")
+struct SumTreeTests {
+    fileprivate static func items(_ n: Int) -> [IntItem] {
+        (0..<n).map { IntItem(value: $0) }
+    }
+
+    @Test(
+        "build from 0, 1, B-1, B, B+1, 2B, 2B+1 and a few thousand items; invariants hold; order preserved",
+        arguments: [0, 1, 5, 6, 7, 12, 13, 3000]
+    )
+    func buildAndInvariants(_ n: Int) throws {
+        let tree = SumTree<IntItem>(items: Self.items(n))
+        try tree.checkInvariants()
+        #expect(tree.items().map(\.value) == Array(0..<n))
+        #expect(tree.summary.count == n)
+    }
+
+    @Test("split at every offset of a medium tree, rejoined by concat, reproduces the original")
+    func splitEveryOffsetAndRejoin() throws {
+        let n = 130
+        let tree = SumTree<IntItem>(items: Self.items(n))
+        for k in 0...n {
+            let (left, right) = tree.split(where: { $0.count >= k })
+            try left.checkInvariants()
+            try right.checkInvariants()
+            #expect(left.items().map(\.value) == Array(0..<k), "k=\(k)")
+            #expect(right.items().map(\.value) == Array(k..<n), "k=\(k)")
+            let rejoined = SumTree.concat(left, right)
+            try rejoined.checkInvariants()
+            #expect(rejoined.items().map(\.value) == Array(0..<n), "k=\(k)")
+        }
+    }
+
+    @Test("concat of every pair of heights (0..3) you can build cheaply passes the invariants")
+    func concatEveryHeightPair() throws {
+        // B=6, so height 0 tops out at 12 items, height 1 at up to 12*12=144, height 2 at
+        // up to 12*144, height 3 beyond that; pick counts comfortably inside each band.
+        let counts = [0, 1, 6, 12, 50, 144, 1000, 2000]
+        var trees: [SumTree<IntItem>] = []
+        var offset = 0
+        for n in counts {
+            trees.append(
+                SumTree<IntItem>(items: (offset..<(offset + n)).map { IntItem(value: $0) }))
+            offset += n
+        }
+        for a in trees {
+            for b in trees {
+                let joined = SumTree.concat(a, b)
+                try joined.checkInvariants()
+                #expect(
+                    joined.items().map(\.value) == a.items().map(\.value) + b.items().map(\.value))
+            }
+        }
+    }
+
+    @Test("persistence: editing a copy of a tree does not change the original, deep edit")
+    func persistenceDeepEdit() throws {
+        let n = 500
+        let original = SumTree<IntItem>(items: Self.items(n))
+        let originalItemsBefore = original.items().map(\.value)
+        let originalSummaryBefore = original.summary
+
+        var copy = original
+        // Split deep inside the tree (not at a root-leaf-only offset) and rebuild with
+        // different content, so the edit rebuilds a path through at least one interior
+        // level rather than only touching a root leaf.
+        let (left, right) = copy.split(where: { $0.count >= 250 })
+        let replacement = SumTree<IntItem>(items: [IntItem(value: -1)])
+        copy = SumTree.concat(SumTree.concat(left, replacement), right)
+
+        #expect(original.items().map(\.value) == originalItemsBefore)
+        #expect(original.summary == originalSummaryBefore)
+        #expect(copy.items().map(\.value) != originalItemsBefore)
+        #expect(copy.summary.count == n + 1)
+    }
+
+    @Test("empty tree invariants and properties")
+    func emptyTree() throws {
+        let tree = SumTree<IntItem>()
+        try tree.checkInvariants()
+        #expect(tree.isEmpty)
+        #expect(tree.items().isEmpty)
+        #expect(tree.summary == .identity)
+    }
+
+    // MARK: - find
+
+    /// `find` had zero test coverage before this: it has exactly one call site
+    /// (`Rope.locate`), which has exactly one caller (`Rope.isScalarBoundary`), which was
+    /// never called anywhere in `Tests/`. Two mutations proved it (a reviewer's): changing
+    /// `findNode`'s leaf return from `(item, cum)` to `(item, next)` broke no test, and
+    /// neither did changing `Rope.locate`'s predicate from `>` to `>=`. This test targets the
+    /// first of those directly: `find` must agree with `cut` on both the returned item *and*
+    /// its `itemPrefix` (the pre-item cumulative summary) — `(item, next)` would report the
+    /// *post*-item cumulative instead, which `cut`'s independently-computed `itemPrefix`
+    /// would catch immediately. Sizes cover height 0 (a leaf, up to 12 items), height 1 (up
+    /// to 144), and height ≥ 2 (beyond that) — see `concatEveryHeightPair`'s comment for the
+    /// branching-factor arithmetic. Every offset of every size is checked, which covers the
+    /// first item, the last item, and a predicate that is already true at the first item
+    /// (`k == 0`) for free.
+    @Test(
+        "find agrees with cut on item and itemPrefix for every offset, at several sizes/heights",
+        arguments: [1, 6, 12, 50, 144, 1000]
+    )
+    func findAgreesWithCut(_ n: Int) {
+        let tree = SumTree<IntItem>(items: Self.items(n))
+        for k in 0..<n {
+            let predicate: (IntSummary) -> Bool = { $0.count > k }
+            guard let (_, cutItem, cutPrefix, _) = tree.cut(where: predicate) else {
+                Issue.record("n=\(n), k=\(k): cut returned nil")
+                continue
+            }
+            guard let (findItem, findPrefix) = tree.find(where: predicate) else {
+                Issue.record("n=\(n), k=\(k): find returned nil")
+                continue
+            }
+            #expect(findItem.value == cutItem.value, "n=\(n), k=\(k): item mismatch")
+            #expect(findPrefix == cutPrefix, "n=\(n), k=\(k): itemPrefix mismatch")
+        }
+    }
+
+    @Test("find on an empty tree returns nil")
+    func findOnEmptyTree() {
+        let tree = SumTree<IntItem>()
+        #expect(tree.find(where: { $0.count > 0 }) == nil)
+    }
+
+    @Test("find with a predicate that never triggers returns nil")
+    func findNeverTriggers() {
+        let tree = SumTree<IntItem>(items: Self.items(10))
+        #expect(tree.find(where: { $0.count > 100 }) == nil)
+    }
+
+    /// `findNeverTriggers` above uses `n = 10`, a single leaf at height 0, so it only ever
+    /// exercises `findNode`'s *leaf* `nil` branch. `findNode` has two `return nil` sites
+    /// (leaf and interior); this covers the interior one with a height-≥-1 tree.
+    ///
+    /// Self-checked by mutating that specific interior `return nil` to fabricate an answer
+    /// instead of admitting failure — walk to the last leaf reachable from the last child and
+    /// return its last item, ignoring `predicate` entirely (a plausible real bug: "nothing
+    /// matched in the loop, so fall back to the last item" instead of correctly propagating
+    /// failure). A version of this self-check that instead re-called `findNode` with a
+    /// forced-`true` predicate was tried first and rejected: it collided with this same
+    /// round's other new precondition (`findNode`'s `!predicate(prefix)` guard, which that
+    /// forced-`true` predicate trips immediately), turning the self-check into a process
+    /// crash rather than a clean `#expect` failure — informative, but not what this specific
+    /// test is meant to isolate. See the implementer's report for what was observed under
+    /// both.
+    @Test("find with a predicate that never triggers returns nil, height >= 1")
+    func findNeverTriggersAtHeight() {
+        let tree = SumTree<IntItem>(items: Self.items(200))
+        #expect(tree.height >= 1)
+        #expect(tree.find(where: { $0.count > 1000 }) == nil)
+    }
+
+    // MARK: - Rebalancing: rewrap's overflow branch
+
+    /// 3,000 rounds; each round joins two freshly-built, independently random-sized trees
+    /// (1-4,000 items) by `concat` or by splitting one and splicing the other into the
+    /// middle, then checks invariants and discards both. Every other test in this file
+    /// concatenates only equal-sized or single-item trees, which is why `rewrap`'s
+    /// `children.count > 2 * B` overflow branch (`SumTree.swift`'s `rewrap`) is never
+    /// reached: instrumented, it fires 0 times across the whole existing suite and 171 times
+    /// across a workload shaped like this one (measured, seed `0xC0FFEE`; see
+    /// `M1.1-perf-findings.md`). This test must fail if `rewrap`'s
+    /// `let mid = children.count / 2` is changed to `let mid = 1` — that mutation was
+    /// self-checked by hand (file backup, targeted edit, `touch`, rerun, restore; see the
+    /// implementer's report for what was observed).
+    @Test("randomised concat/insert of random-sized trees keeps invariants every round")
+    func randomizedConcatAppend() throws {
+        var rng = SplitMix64(seed: 0xC0FF_EE)
+
+        // Each round builds two fresh, independently-sized trees (1...4,000 items) and
+        // joins them, then discards both — deliberately *not* one tree accumulated across
+        // all 3,000 rounds. `checkInvariants()` (below) walks the whole tree, which is
+        // O(size); a single accumulating tree would grow into the millions of items by the
+        // end of the run and make an every-round full-tree walk cost billions of node
+        // visits. Bounding each round's tree to a few thousand items is what makes "check
+        // every round" tractable while still varying the sizes enough to reach the overflow
+        // branch — matching `M1.1-perf-findings.md`'s "randomly-sized ropes" reproduction.
+        for round in 0..<3000 {
+            let sizeA = 1 + Int(rng.next() % 4000)
+            let sizeB = 1 + Int(rng.next() % 4000)
+            let treeA = SumTree<IntItem>(items: Self.items(sizeA))
+            let treeB = SumTree<IntItem>(items: Self.items(sizeB))
+
+            let combined: SumTree<IntItem>
+            if rng.next() % 2 == 0 {
+                combined = SumTree.concat(treeA, treeB)
+            } else {
+                let at = Int(rng.next() % UInt64(sizeA + 1))
+                let (left, right) = treeA.split(where: { $0.count >= at })
+                combined = SumTree.concat(SumTree.concat(left, treeB), right)
+            }
+
+            do {
+                try combined.checkInvariants()
+            } catch {
+                Issue.record("seed 0xC0FFEE, round \(round): invariant violation \(error)")
+            }
+            #expect(combined.summary.count == sizeA + sizeB, "round \(round): item count drifted")
+        }
+    }
+
+    /// Reaches `rewrap`'s overflow branch deterministically in one operation, instead of by
+    /// the luck of a random seed — a seeded random test that happens to hit the branch is
+    /// not a substitute, because if the op distribution shifts the coverage silently
+    /// disappears again (that is exactly how this branch went uncovered in the first
+    /// place). Builds an interior node with exactly `2B` (12) children — 11 ordinary leaves
+    /// at the minimum fill (`B` = 6 items) and a last leaf that is *full* (`2B` = 12 items,
+    /// "one item short of splitting": one more item pushes it over the leaf cap and splits
+    /// it in two) — then concats a single-item tree onto it. That growth turns the last
+    /// child's one node into two, taking the already-full interior node from `2B` to
+    /// `2B + 1` children and forcing `rewrap` to split it, growing the tree by one level.
+    @Test("deterministic: concat reaches rewrap's overflow branch in one operation")
+    func rewrapOverflowBranchDeterministic() throws {
+        var value = 0
+        var children: [Node<IntItem>] = []
+        for _ in 0..<11 {
+            let items = (0..<6).map { _ -> IntItem in
+                defer { value += 1 }
+                return IntItem(value: value)
+            }
+            children.append(.leaf(items, IntSummary(count: items.count)))
+        }
+        let fullLeafItems = (0..<12).map { _ -> IntItem in
+            defer { value += 1 }
+            return IntItem(value: value)
+        }
+        children.append(.leaf(fullLeafItems, IntSummary(count: fullLeafItems.count)))
+        #expect(children.count == 12)
+
+        let totalBefore = children.reduce(0) { $0 + $1.summary.count }
+        let bigRoot = Node<IntItem>.interior(children, IntSummary(count: totalBefore), 1)
+        let bigTree = SumTree<IntItem>(root: bigRoot)
+        try bigTree.checkInvariants()
+
+        let extra = IntItem(value: value)
+        let smallTree = SumTree<IntItem>(items: [extra])
+
+        let result = SumTree.concat(bigTree, smallTree)
+        try result.checkInvariants()
+
+        #expect(result.height == 2, "expected rewrap's split to grow the tree by one level")
+        guard case .interior(let topChildren, _, _) = result.root else {
+            Issue.record("expected an interior root after the overflow split")
+            return
+        }
+        #expect(
+            topChildren.count == 2, "rewrap should have split the 13 overflowing children in two")
+
+        let expected = Array(0...value)
+        #expect(result.items().map(\.value) == expected)
+        #expect(result.summary.count == expected.count)
+    }
+
+    // MARK: - checkInvariants() has no negative test without these
+
+    /// Mutations that deleted the leaf lower-bound check and the empty-leaf check both
+    /// survived the whole suite before this section existed: nothing constructed a
+    /// deliberately malformed tree to prove the checker actually catches what its own doc
+    /// comment claims it catches. `Node`'s cases are `package`-visible and `SumTree.init(
+    /// root:)` is `package` for exactly this (see `SumTree.swift`'s doc comment on it).
+    private static func leaf(_ n: Int, from start: Int = 0) -> Node<IntItem> {
+        let items = (start..<(start + n)).map { IntItem(value: $0) }
+        return .leaf(items, IntSummary(count: n))
+    }
+
+    @Test("checkInvariants() throws on an underfull non-root leaf")
+    func checkInvariantsCatchesUnderfullLeaf() throws {
+        // Branching factor is 6; a non-root leaf must hold 6...12 items. 2 is underfull.
+        let underfull = Self.leaf(2, from: 6)
+        let normal = Self.leaf(6)
+        let root = Node<IntItem>.interior(
+            [normal, underfull], IntSummary(count: 8), 1)
+        let tree = SumTree<IntItem>(root: root)
+        #expect(throws: SumTreeInvariantViolation.self) {
+            try tree.checkInvariants()
+        }
+    }
+
+    @Test("checkInvariants() throws on an empty non-root leaf")
+    func checkInvariantsCatchesEmptyLeaf() throws {
+        let empty = Node<IntItem>.leaf([], .identity)
+        let normal = Self.leaf(6)
+        let root = Node<IntItem>.interior([normal, empty], IntSummary(count: 6), 1)
+        let tree = SumTree<IntItem>(root: root)
+        #expect(throws: SumTreeInvariantViolation.self) {
+            try tree.checkInvariants()
+        }
+    }
+
+    @Test("checkInvariants() throws on a one-child interior node")
+    func checkInvariantsCatchesOneChildInterior() throws {
+        // The root interior lower bound is 2 children; 1 is below it.
+        let onlyChild = Self.leaf(6)
+        let root = Node<IntItem>.interior([onlyChild], IntSummary(count: 6), 1)
+        let tree = SumTree<IntItem>(root: root)
+        #expect(throws: SumTreeInvariantViolation.self) {
+            try tree.checkInvariants()
+        }
+    }
+
+    @Test("checkInvariants() throws when leaves are at mismatched depth")
+    func checkInvariantsCatchesMismatchedDepth() throws {
+        // A leaf child (height 0) alongside an interior child (height 1) under the same
+        // parent: every leaf under the interior child is one level deeper than the leaf
+        // child sitting beside it. `checkNode`'s "children are not all the same height"
+        // check is what transitively guarantees uniform leaf depth across the whole tree
+        // (see `SumTree.swift`'s file header, "All leaves are at the same depth"): it is
+        // enforced locally at every interior node, not by a separate global leaf-depth walk.
+        let shallowLeaf = Self.leaf(6)
+        let deeperChildren = (0..<6).map { Self.leaf(6, from: 6 + $0 * 6) }
+        let deeperSubtree = Node<IntItem>.interior(
+            deeperChildren, IntSummary(count: 36), 1)
+        let root = Node<IntItem>.interior(
+            [shallowLeaf, deeperSubtree], IntSummary(count: 42), 1)
+        let tree = SumTree<IntItem>(root: root)
+        #expect(throws: SumTreeInvariantViolation.self) {
+            try tree.checkInvariants()
+        }
+    }
+
+    @Test("checkInvariants() throws when a cached summary disagrees with the fold of its items")
+    func checkInvariantsCatchesStaleSummary() throws {
+        let items = (0..<6).map { IntItem(value: $0) }
+        // The correct summary is `count: 6`; claim `count: 999` instead.
+        let root = Node<IntItem>.leaf(items, IntSummary(count: 999))
+        let tree = SumTree<IntItem>(root: root)
+        #expect(throws: SumTreeInvariantViolation.self) {
+            try tree.checkInvariants()
+        }
+    }
+}
