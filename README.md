@@ -74,7 +74,7 @@ refuses to run against a binary older than the sources.
   (declared capabilities lie), and anything visual by pixels.
 - **Third-party code: none by default.** SQLite comes from the system; tree-sitter and its
   grammars are vendored C compiled as SwiftPM C targets; ripgrep and git are subprocesses.
-  Adding a dependency is a milestone decision, recorded with its licence.
+  Adding a SwiftPM dependency is a milestone decision, recorded with its licence.
 - **Swift 6 language mode, strict concurrency.** No `-Ounchecked`, no `unsafeFlags`, no
   force-unwraps in product code. Anything holding a resource has an explicit `close()`;
   long chains are torn down iteratively; every timer has a tolerance; nothing polls.

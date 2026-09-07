@@ -32,10 +32,12 @@ the oracle's output so the next reader can check it:
   '(progn ...)'` answers "what does GNU do here" in one command. Reticle M110 built a
   data-corrupting `kill-whole-line` from a spec written from memory; a cold reviewer caught it
   by running the real thing. Conformance tests carry the recorded oracle output.
-- **LSP**: probe the real server with `dev/lsp-probe.py` (ported from Reticle) before scoping
-  any LSP work, against the *Verilog* servers first. Declared capabilities lie: verible
-  declares no hover and answers it; declares references and answers them incompletely;
-  its rename can corrupt code. A repro that holds on rust-analyzer is not a reason to do it.
+- **LSP**: probe the real server before scoping any LSP work, against the *Verilog* servers
+  first. Declared capabilities lie: verible declares no hover and answers it; declares
+  references and answers them incompletely; its rename can corrupt code. A repro that holds
+  on rust-analyzer is not a reason to do it. **The prober is not here yet**:
+  `~/My_Projects/reticle/dev/lsp-probe.py` is the one to port, in the first milestone that
+  needs it (M10).
 - **Pixels**: every claim about what the GUI looks like is settled by a golden image from the
   canvas's headless path or a screenshot of the real window (`dev/gui-shot.sh`), never by
   reading code. Reticle's eyeballing was wrong twice, and three converging code-level
@@ -50,8 +52,9 @@ match the code".
 
 ## Build and verification
 
-Toolchain: Xcode 26.6, Swift 6.3, SwiftPM only (no `.xcodeproj`); `xcodebuild`/`actool` are
-used only by `dev/make-app-bundle.sh` for the icon and bundle. Tests use Swift Testing.
+Toolchain: Xcode 26.6, Swift 6.3, SwiftPM only (no `.xcodeproj`). No script here invokes
+`xcodebuild`; the one Xcode tool used is `actool`, which `dev/make-app-bundle.sh` calls to
+compile the icon. Tests use Swift Testing.
 
 **Definition of done (all required):**
 
@@ -98,9 +101,12 @@ with its license; before the first `swift build` that fetches it, read its `Pack
 and any build plugins, because a build runs that code with the user's full permissions.
 
 **GUI verification.** `dev/make-app-bundle.sh` then `dev/gui-shot.sh FILE OUT.png` for a
-frame at startup; `dev/gui-drive.sh DRIVER.el FILE OUT-DIR [SECONDS...]` for anything that
-changes while running (a throwaway `HOME`, the driver as init file, pixel diffs between
-frames). Both refuse to run against a binary older than the sources; build first. Keystroke
+frame at startup; it refuses to run against a binary older than the sources, so build first.
+For anything that changes while running there is no tool here yet: port
+`~/My_Projects/reticle/dev/gui-drive.sh` (a throwaway `HOME`, an Elisp driver as init file,
+pixel diffs between frames) in the first milestone whose done-condition needs the GUI
+watched while it runs — M6's "chords still reach the command loop while an IME is
+composing" and M7's "the which-key HUD shows after a prefix key" are both that shape. Keystroke
 automation from an agent session did not work for Reticle (three attempts); drive the GUI
 from Elisp through the editor's own idle hooks instead.
 
@@ -110,8 +116,11 @@ baseline (`git worktree` of the old commit). Energy and latency claims use the r
 protocol in `PLAN.md` section 4.14 (`powermetrics`, `xctrace`, soak).
 
 Document every known gap (file header plus the "not in v1" section of `PLAN.md`). Mutation-
-test important fixes with `dev/mutate.py`; where a defence cannot be observed by a test,
-say so in the test comments instead of pretending.
+test important fixes; where a defence cannot be observed by a test, say so in the test
+comments instead of pretending. **There is no runner here yet** — mutations are done by
+hand, with a file backup, a targeted edit and `touch`, which is what M0 did.
+`~/My_Projects/reticle/dev/mutate.py` is the one to port, and it is Rust-specific enough
+that porting is a real job rather than a copy.
 
 ## Wayfinding
 
@@ -236,8 +245,8 @@ Written in the second person to the agent, every time:
 - **Touching `lisp/*.el` requires the Elisp hygiene test** (`swift test --filter
   LispHygiene`): it catches an unescaped quote inside a docstring, which the reader accepts
   silently and which fails later with an error naming a symbol that does not exist.
-- **Do not run `dev/mutate.py` yourself**; self-check with a file backup, a targeted edit and
-  `touch`.
+- **Do not run a mutation pass yourself**; self-check with a file backup, a targeted edit
+  and `touch`.
 - **"Flaky" requires evidence**: no "environmental noise" without an observation that
   distinguishes it; rerun a dozen times first.
 - **Wrap-up**: `git status` converged to the original file set, no scratch files left.
