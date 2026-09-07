@@ -1536,6 +1536,21 @@ would delete the one oracle this project's discipline depends on. Path copy argu
 way -- it shares sibling subtrees verbatim and never re-folds neighbours, so a rebalancing
 defect it introduces *persists* and an end-of-run check catches it.
 
+Where the ~115 us goes, measured directly with `-O -wmo` (this is the table to work
+against; it was nearly lost with the session scratchpad):
+
+| operation | cost |
+|---|---|
+| `Node.makeLeaf` of 12 chunks | **618 ns** -- essentially all of it the chunk byte re-scan |
+| `Node.makeInterior` of 12 children | 113 ns |
+| copy a 12-element `[Node]` | 168 ns (a trivial-element copy is 44 ns, so ~10 ns per retain/release pair) |
+| fold 12 node summaries | 98 ns |
+
+Against the counted 296 `makeInterior` + 106 `makeLeaf` per insert, that is ~98 us of ~119 us
+in node construction. ARC is ~20% and is a *symptom* of doing 402 constructions, not a cause:
+it is removed by cutting constructions to ~5, not by changing `Node`'s representation, so do
+**not** make `Node` `indirect` or class-backed.
+
 New surface in `SumTree.swift`, from the review:
 
 ```swift
@@ -2089,6 +2104,24 @@ observations, is recorded and not acted on -- the sentence after it already says
 observations and not a rule.
 
 ---
+
+## Handover: how to resume, updated 2026-09-08
+
+**Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the
+whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
+
+- **State**: M0 and M1.1 are done, each with a record in section 11. The gate is green
+  (`Test run with 64 tests in 13 suites passed`). The working tree is clean.
+- **Next work item**: **M1.1b**, the rope's edit path -- designed, prototyped, not started.
+  The design is the `#### M1.1b` subsection of the M1.1 record; the prototypes and their
+  cautions are in `dev/spikes/m1.1b-rope-edit-path/`. Its hard half is deletion's underflow
+  repair, which the prototype does not implement. Then M1.2 (byte/char/UTF-16/line
+  conversions, and a bottom-up bulk loader -- `Rope(String)` runs at ~91 MB/s today), M1.3
+  markers, M1.4 interval tree, M1.5 undo.
+- **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`.
+  Do not skip the trailing re-review; M1.1's worst defects were all found after the gate was
+  already green, and two of them were introduced by the fixes for the first one.
+- `dev/mutate.py` is the harness for step 5. Read its header before trusting a survivor.
 
 ## Handover: state after M0, 2026-09-06
 

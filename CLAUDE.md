@@ -115,6 +115,17 @@ comparisons are re-measured by the main conversation on this machine against a c
 baseline (`git worktree` of the old commit). Energy and latency claims use the release
 protocol in `PLAN.md` section 4.14 (`powermetrics`, `xctrace`, soak).
 
+**How to measure, or the number is wrong.** All three of these cost M1.1 a wrong conclusion:
+build with `-O -wmo` (`swift build -c release` passes `-whole-module-optimization`; plain
+`swiftc -O` does not, and the gap was 2-3x); **`swift test` builds in debug**, so a perf
+number from an ungated test measures unoptimised code and is not evidence; and A/B *within
+one process*, because insert cost varied 94-352 us across separate binaries built from
+identical source on this machine. Assert an **absolute** bound, never only a ratio: a
+uniformly slow implementation has an excellent ratio, and M1.1's scaling test passed at 3.7x
+against a bar of 8x while every operation was ~100x too slow. And verify a fact against the
+*real* type, not a simplified stand-in: `MemoryLayout<Node<Chunk>>.stride` was recorded as 24
+from a probe that used `Int` as the summary; it is 72.
+
 Document every known gap (file header plus the "not in v1" section of `PLAN.md`). Mutation-
 test important fixes; where a defence cannot be observed by a test, say so in the test
 comments instead of pretending. **There is no runner here yet** — mutations are done by
