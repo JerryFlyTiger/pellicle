@@ -1665,7 +1665,8 @@ were **errors in the task spec, not in the implementation**, which is the useful
 3. **Four of the new validator's guards had no coverage, and nothing asserted that a *valid*
    multi-byte scalar is accepted.** The second half matters more: a false *reject* would have
    been invisible, because `replaceSubrange` silently falls back to the general path and every
-   content assertion would still pass. Eight tests added, five declines and one acceptance.
+   content assertion would still pass. **Eight** decline tests now reach the validator, plus
+   one asserting that a valid multi-byte scalar is *accepted*.
 4. **A test comment claimed a discriminating power its fixture did not have.** The 30/40-byte
    fixture sums to 70, over the 64-byte coalesce threshold, so deleting the short-circuit it
    was meant to protect did not make it fail. Rebuilt at 10/20 in a root leaf and **proved**:
@@ -1721,12 +1722,16 @@ rope.** `runModelProperty` recomputes `scalarBoundaries(model)` -- a full O(n) s
 an `[Int]` of every boundary -- on every one of its 20,000 operations, so at a 4 MB model the
 oracle is essentially the entire wall clock and an edit-path change of any size disappears
 into it. Left alone as out of this milestone's scope; recorded so nobody reads that number as
-a rope measurement. `millionOperationsSmallRope`, whose model is ~8 KB, went 16.25 s -> 7.50 s.
+a rope measurement. `millionOperationsSmallRope`, whose model is ~8 KB, went 16.26 s -> 7.50 s.
 
 **One pre-existing test was retuned**, and it was reviewed as such: the randomised model's
-small band went from `maxSize: 512` to `2048`. Tighter chunking means 512 bytes now fits in a
-single height-0 leaf, so the band stopped reaching the height 0->1 transition its own
-assertion requires. It still starts at 0 with no floor, so it still visits the empty rope.
+small band went from `maxSize: 512` to `2048`, and with it `deleteMaxWidth` 16 -> 64 and the
+paste pool `[50,150,300]` -> `[200,600,1200]` -- a multi-parameter retune, not a single bound
+moved. The cause is not a change in chunk *size* (`packChunks` still targets 64 bytes) but in
+chunk *fill*: leaf-local coalescing packs harder than `concatMergingSeam`'s seam-only merging
+did, so 512 bytes now fits in a single height-0 leaf and the band stopped reaching the
+height 0->1 transition its own assertion requires. It still starts at 0 with no floor, so it
+still visits the empty rope.
 
 **Not done here, and still M1.1b's remaining half**: `Fragment` + `TreeBuilder` replacing the
 general path, deleting `buildFromNodes` and `Rope.concatMergingSeam`, and the `B` re-sweep
@@ -1746,6 +1751,19 @@ that round's outcome is recorded below rather than being quietly folded in.
 **These commits are local.** Nothing in this repository has ever been pushed: `origin/main`
 still sits six commits behind, at the state before M1.1. That is the standing arrangement, not
 an oversight -- but it means the only copy of this work is this machine.
+
+*The round this record was owed then ran, and found three false claims in it* -- all three
+fixed above, and worth naming because they are what an unreviewed record costs: a test count
+that was both wrong and internally inconsistent ("eight tests, five declines and one
+acceptance"); `16.25 s` for a log reading `16.25501...`; and a batch-size series in the
+handover that silently mixed two counting conventions. It also re-derived the underflow bound
+arithmetic, both mutation-survivor explanations, the never-traps claim and every number in the
+measurement table against the logs, and found those sound. Two findings are recorded and not
+acted on: that "tighter chunking" invited reading a packing-size change where the change is in
+fill (the paragraph above now says so), and that the record's attribution of two defects to the
+task spec cannot be checked, because the spec was a prompt and was never committed -- true, and
+the honest form of it is that no artifact survives to audit that attribution. This paragraph
+is the loop's terminator, not a new batch.
 
 ---
 
@@ -2275,9 +2293,12 @@ whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be r
 - **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`.
   Do not skip the trailing re-review; M1.1's worst defects were all found after the gate was
   already green, and two of them were introduced by the fixes for the first one. Stage 1 ran
-  five review rounds on batches of 704, 323, 212, 40 and 17 lines -- the fourth still found a
-  false claim, and **two of its four real defects were errors in the task spec rather than in
-  the implementation**, so read a returned finding as evidence about the spec too.
+  five review rounds on batches of 704, 204, 145, 40 and 17 **added lines** (one convention,
+  counted the same way for all five -- an earlier version of this line mixed two and a cold
+  read caught it). The fourth still found a false claim, and **two of its four real defects
+  were errors in the task spec rather than in the implementation**, so read a returned finding
+  as evidence about the spec too. A sixth round, on the milestone record itself, found three
+  more.
 - `dev/mutate.py` is the harness for step 5. Read its header before trusting a survivor.
 
 ## Handover: state after M0, 2026-09-06
