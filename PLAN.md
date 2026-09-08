@@ -1518,11 +1518,12 @@ it barely passes is the defect this sub-milestone is about.
 
 #### M1.1b, designed and not started: the edit path
 
-*(Heading kept as it stood when M1.1 closed. **Stage 1 of this design shipped on 2026-09-08**
--- the path copy with overflow and underflow repair, item (1) of the order below -- and has
-its own record further down this section. Items (2) and (3), `Fragment`/`TreeBuilder` and the
-`B` re-sweep, are still open. The design below is unedited and is still the specification for
-them.)*
+*(Heading kept as it stood when M1.1 closed. **All three items of this design shipped on
+2026-09-08** -- stage 1 (item (1), the path copy with overflow and underflow repair) and
+stage 2 (items (2) and (3), `Fragment`/`TreeBuilder` and the `B` re-sweep), each with its own
+record further down this section. The design below is unedited, so read it as the
+specification as it stood, not as a description of the code: three of its details did not
+survive contact with the implementation, and the stage 2 record lists them.)*
 
 The architecture review of 2026-09-07 compared four designs against the measured problem
 (one single-byte insert rebuilds ~400 nodes: 211 `concatNodes`, 296 `makeInterior`, 106
@@ -1764,6 +1765,336 @@ fill (the paragraph above now says so), and that the record's attribution of two
 task spec cannot be checked, because the spec was a prompt and was never committed -- true, and
 the honest form of it is that no artifact survives to audit that attribution. This paragraph
 is the loop's terminator, not a new batch.
+
+---
+
+### M1.1b stage 2: `Fragment` + `TreeBuilder` and the `B` re-sweep -- done 2026-09-08
+
+M1.1b's remaining half. `splitNode`/`cutNode` called `buildFromNodes` at *every level* of their
+descent, and `buildFromNodes` folded `concatNodes` across up to `B + 1` siblings, so one cursor
+walk did O(B * h^2) node reconstructions. That is now one descent emitting per-level
+`Fragment`s and one bottom-up join. Gate: 87 tests -> **96**.
+
+**The idea that dissolves the obstruction** (the architect's, validated in
+`dev/spikes/m1.1b-rope-edit-path/proto-fragment-pushtree.swift` over 3,926 split points and all
+81 height pairs): an underfull group is legal as an *argument* to the join and illegal as a
+*stored* node. `Fragment` is that distinction made into a type -- `.items(ArraySlice<Item>)` or
+`.nodes(ArraySlice<Node>, height:)`, transient, never stored. When the join meets an argument of
+its own height it splices that argument's **children in flat**, because each of those children is
+individually well-formed even when their parent group is not. So `checkInvariants()` keeps its
+assertions verbatim, which is the whole reason this was preferred to the relaxed invariant.
+
+**Measured by the main conversation, release, one process** (`-O -wmo`, the protocol this file's
+"How to measure" paragraph insists on). The "before" column is a `git worktree` of the
+pre-change commit running the same benchmark; the general path had no benchmark until this
+milestone added one, so this number did not exist before. It does not match stage 1's 120.6 us
+for what is nearly the same code, and the gap is expected rather than a transcription slip: that
+number came from a different binary in a different session, and `CLAUDE.md` records a 94-352 us
+spread across binaries built from identical source. That note names an operation only as "insert", with no
+size and no fast-path/general-path distinction, so read it as the order of magnitude of
+cross-binary variance on this machine rather than as a bound on
+this specific measurement -- round 6 was right that an earlier version of this sentence claimed it
+was "for exactly this operation", which the source does not say. 96.8 against 120.6 is a 20% gap,
+comfortably smaller than that spread. The ratio below is therefore read as "roughly eightfold", not as
+its second digit.
+
+| single-scalar insert, general path only | before | after | |
+|---|---|---|---|
+| 1 MB | 96.8 us | **12.8 us** | 7.6x |
+| 10 MB | 139.2 us | **16.7 us** | 8.3x |
+
+The design predicted 13.7-16.5 us for this builder **at 1 MB**, which is the only size that
+table covers; the shipped path measures 12.8 there, just under the band. The 10 MB figure of 16.7
+has nothing to compare against -- quoting it against the same band, as an earlier version of this
+sentence did, borrows a prediction the design never made, and 16.7 is in any case above 16.5, not
+"just under" it. The **fast path
+is untouched** and measured unchanged: **2.57 us at 1 MB and 3.90 at 10 MB** on the shipped tree
+(median of three release runs), against stage 1's 3.18 and 4.58. Separate binaries, so read that
+as "unchanged", not as an improvement. Two earlier numbers in this record, 3.04 and 4.04, were
+measured before the coalesce guard was removed and are kept only in the guard table below, where
+they are one column of a comparison; round 5 caught the handover quoting the guard-kept number as
+the shipped one. New iteration
+benchmark: 6.4 ns/chunk, 0.176 ns/byte.
+
+**Deleted**: `buildFromNodes`, `rewrap`, `splitNode`, `cutNode`, `Rope.concatMergingSeam`.
+`concatNodes` survives as a one-line wrapper over the join, so there is one rebalancing
+implementation rather than two. `SumTree.split`/`cut`/`find`/`concat` keep their signatures.
+
+**`generalPathReplace` went from six cursor walks to two.** It was `splitTree` x2 (one `cut`
+each) plus `concatMergingSeam` x2 (two `cut`s each); four of the six existed only to serve the
+seam policy. It is now two `splitFragments` descents into the *original* tree and one build,
+with the `<= 64` seam merge done on the boundary fragments as array reads. The builder stays
+generic and knows nothing about chunk sizes -- `Rope.init(unmergedChunks:)` depends on bulk
+construction *not* coalescing, so a coalescing hook inside `TreeBuilder` would have broken it.
+
+#### The defect that mattered: a trap became silent data corruption
+
+The first version sliced the two straddling chunks by hand without the scalar-boundary
+`precondition` that the `splitTree` it replaced still performs. Reproduced by the main
+conversation before fixing anything:
+
+```
+Rope("é" + String(repeating: "m", count: 100)); removeSubrange(0..<1)
+before: [c3, a9, 6d, 6d]      after: [a9, 6d, 6d, 6d]      toString: "\u{FFFD}mm..."
+checkTreeInvariants() PASSED
+```
+
+The pre-change commit traps on the same input (`byte offset 1 is not a scalar boundary`). So the
+milestone had converted a loud programmer-error trap into silent corruption of the user's text.
+
+**The tree oracle structurally cannot catch this.** `Rope.checkTreeInvariants` compares a chunk's
+cached summary against `recomputedSummaryFromBytes()`, and both are derived from the same
+corrupted bytes, so they agree. That is the same blind spot stage 1 recorded for its dead
+`bytes`-validity check, hit from a different direction -- worth stating twice, because "the
+invariant checker passes" reads like evidence and here it is not.
+
+Both guards are restored. **Nothing regression-tests them**, and that was established by
+mutation, not by argument: delete either one and all 96 tests pass. Every randomised and
+differential test in `ropeTests.swift` draws its offsets from `scalarBoundaries`, so none can
+present a non-boundary offset to this path, and asserting a `precondition` trap needs an
+out-of-process crash harness this project does not have. Known gap, recorded here because the
+code comment at the guards points at this record for it; the repro above is its first case.
+
+#### `B` re-swept and kept at 6
+
+Swept B in {4, 6, 8, 12, 16, 24} on the new implementation, five runs each, medians (a separate
+binary per B, so within-binary spread -- 2-12% -- is the noise floor to beat):
+
+| B | general-path insert 1 MB / 10 MB | fast-path insert 1 MB / 10 MB | iteration 1 MB |
+|---|---|---|---|
+| 4 | 11.4 / 18.0 us | 3.23 / 3.90 us | 5.89 ns/chunk |
+| **6** | **11.9 / 16.3 us** | **2.69 / 3.67 us** | 5.83 ns/chunk |
+| 8 | 12.0 / 16.2 us | 3.24 / 4.40 us | 4.06 ns/chunk |
+| 12 | 12.7 / 17.8 us | 2.84 / 4.26 us | 4.11 ns/chunk |
+| 16 | 12.4 / 18.3 us | 3.40 / 5.32 us | 3.38 ns/chunk |
+| 24 | 17.2 / 21.2 us | -- | 3.42 ns/chunk |
+
+Edit cost is flat across B = 4...8 and clearly worse at 24. The two axes then disagree:
+**iteration wants a larger B** (B = 8 is 30% faster than B = 6 at 1 MB, far outside the noise)
+and **the fast path wants a smaller one** (B = 6 is the optimum at both large sizes; B = 16 costs
+45% at 10 MB). The mechanism is visible in the code either way: path copy rebuilds arrays of up
+to `2B` children per level, so typing gets worse as B grows, while flattening gets better because
+there are fewer interior nodes per item.
+
+**Kept at 6**, deliberately: the fast path is the typing path and B = 6 is its measured optimum,
+whereas iteration's gain sits on `chunks()` -- a full flatten that no product path runs per
+keystroke, and the exact operation M1.2's lazy cursor is expected to replace, which would change
+its cost shape entirely. Changing B would also have invalidated dozens of hard-coded B = 6
+fixtures in `sumTreeTests.swift` for a gain measured on the operation most likely to be
+redesigned next. Recorded so the sweep does not have to be redone; re-run it when the cursor
+lands, because that is the event that could move the answer.
+
+#### The seam policy narrowed, measured, and left alone
+
+The new seam merge reads the boundary chunks out of the fragment lists. When an edit bound lands
+exactly at a leaf edge, the neighbouring chunk sits inside a `.nodes` group instead of a
+leaf-level `.items` group, and the merge declines; the old `concatMergingSeam` always reached it
+through `cut`. Two A/B runs against the pre-change commit, identical operation sequences
+(identical byte counts at every checkpoint, which is how the sequences were confirmed identical):
+
+- **Scattered offsets, 20,000 general-path edits**: the new code is *better* -- mean fill 38.82
+  vs 37.37, 9,999 chunks vs 10,389, 2,429 adjacent small pairs vs 3,085.
+- **Boundary-aligned offsets, 30,000 edits** (the adversarial pattern, built to hit the decline):
+  the new code is worse and **plateaus** -- mean fill settles at 45.9 vs 51.6 bytes per chunk,
+  with adjacent-small-pairs/chunks flat at ~11% and under-32-byte-chunks/chunks flat at ~28% from
+  op 5,000 onward. About 12% more chunks per byte, bounded, not a runaway.
+
+**Declined, with the reason.** The pattern that provokes it aligns every edit to an internal
+chunk boundary, which no real editing workload targets, the realistic pattern improved, and the
+fix would add a new O(h) descent to the seam path -- the very code that just produced this
+milestone's one high-severity defect. The fix direction is recorded instead: peel the boundary
+item out of a `.nodes` fragment by descending its right (or left) spine and re-emitting the
+ancestors as fragments, which is O(h) and needs no rebuild. Revisit it in M1.2 alongside the bulk
+loader, where chunk fill is already on the table.
+
+#### The two fill questions stage 1 deferred into this stage
+
+Stage 1's record and the handover both listed these as work for stage 2's sweep, "both fill
+questions and both want measuring alongside the `B` sweep, not before it". They were not in this
+stage's task spec -- that was an omission, caught when the handover was re-read at record time --
+so they were measured afterwards rather than as part of the implementation.
+
+**1. The leaf coalesce guard is gone.** `tryLeafLocalReplace`'s three coalescing blocks each
+required `isWholeLeaf || newItems.count > branchingFactor` before merging a pair. Stage 1 had
+already established by mutation that it is not a correctness defence -- relaxing it takes a leaf
+from 6 items to 5 and nothing fails, because `pathCopyEditNode`'s underflow repair absorbs it.
+Measured on the current code, release, 40,000 sustained fast-path edits:
+
+| | guard kept | guard dropped |
+|---|---|---|
+| adjacent chunk pairs summing `<= 64` | 176 | **56** |
+| mean chunk fill | 45.45 | **47.01** |
+| chunks under 32 bytes | 605 | 530 |
+| 40,000 ops, wall clock | 103.0 ms | 103.3 ms |
+| `scalingRatio` single insert, 1 MB / 10 MB | 3.04 / 4.04 us | 2.50 / 4.49 us |
+
+The two `scalingRatio` numbers move in opposite directions inside a noise band that runs 5-30% on
+this benchmark (the `B` sweep's 2-12% figure above is a different benchmark, measured
+within one binary rather than across runs of one), which is the honest reading: **no measurable cost**, not "faster".
+
+**And the other workload, because quoting only the favourable one is how this project's comments
+have twice gone wrong.** On the mixed randomised model -- big pastes and wide deletes, so a large
+share of its edits go through the general path rather than the fast path -- the guard makes no net
+difference to the same metric. The Part D adjacent-pair scan reads **25 either way**, merely
+redistributed across the two bands:
+
+| | large band | small band |
+|---|---|---|
+| before stage 2 | 15 | 2 |
+| stage 2, guard kept | 25 | 0 |
+| stage 2, guard dropped (shipped) | 19 | 6 |
+
+So the fill gain is real on a fast-path-dominated workload and a wash on a mixed one, and the
+seam narrowing -- not the guard -- is what moved the large band from 15 to 25. The guard was
+removed anyway, on three grounds that do not depend on which workload you weight: it is not a
+correctness defence, it costs nothing measurable, and **its stated rationale was wrong** -- the
+comment claimed it "must never let a leaf drop below this same bound", and the repair below it
+has always been what actually holds that bound. The three comments explaining it, including
+`branchingFactor`'s own doc comment whose stated reason for being `internal` was that guard, were
+rewritten to say so.
+
+**2. The join-point pair `combineUnderflowedSiblings` leaves un-checked is still there.** It is
+one of the two remaining leaf-local causes of such pairs, not the only one -- a cold read caught
+that overstatement in the first draft of this paragraph. The underflow repair concatenates two
+sibling leaves' items with no awareness of the `<= 64` policy, so nothing inspects the pair it
+creates at the join; and separately, the coalesce does not iterate to a fixpoint, so a merge
+product is never re-examined against the neighbour beyond the one it just absorbed (leaf
+`[..., P, F1, F2, ...]`, an edit collapses `P` to one byte, the trailing merge yields `P+F1`, and
+`P+F1` against `F2` is never looked at even when it would fit). That second mechanism predates
+this stage; removing the guard only widened its reach from root leaves to all leaves. It is **deferred again, explicitly**,
+because fixing it is not a local edit: `SumTree` is generic over `Item` and deliberately knows
+nothing about a chunk's 64-byte packing rule, so checking that pair means giving `Summable` an
+item-level coalescing hook -- the same design decision the seam policy faced and was kept out of
+the builder for, and one M1.4's overlay tree gets a vote in, since it will be the second `Item`
+type. Deciding it here, with one client, would be deciding it on half the evidence.
+
+#### Mutations, executed by the main conversation
+
+| mutation | result |
+|---|---|
+| leaf / interior `2B` overflow, `<=` -> `<` | **survived** -- shape only: it splits earlier and both halves still land in `[B, 2B]` |
+| leaf / interior overflow, allow `2B + 1` | killed, by the invariant checker *and* by the new `Fragment` bound `precondition` |
+| drop `!other.isUnderfull` from the join | killed loudly (`leaf item count 1 out of bounds [6,12]`) |
+| reverse left / right fragment push order | killed, 228 / 226 issues |
+| `.nodes` empty-fragment guard removed | killed (`makeInterior`'s own precondition) |
+| `.items` empty-fragment guard removed | **survived** -- equivalent mutant, now documented at the guard |
+| seam `<= 64` -> `< 64`, both sides | **survived**, then killed by two tests written for it |
+| `mergeLeadingSeam` operand order swapped | killed -- and the killer was the *restored* scalar-boundary precondition firing at offset 353, because swapped operands split a multi-byte scalar |
+| either scalar-boundary `precondition` deleted | **survived** -- the known gap above |
+
+The seam survivors are the useful ones. Every pre-existing seam test used pairs summing well
+under the threshold (40 and 35), so nothing pinned the threshold's *value*; `<= 64` -> `< 64`
+left the whole suite green on both sides. The cold reviewer predicted this for the leading side
+only; the mutation showed it was true of both. Two tests now pin the exact boundary (34 + 30, and
+a 40/30 fixture split at offset 6 leaving a 34-byte remainder), and each kills its mutant with
+exactly one failing test.
+
+#### Where the spec was wrong
+
+Stage 1 recorded that two of its four real defects were errors in the task spec rather than in
+the implementation, and that this could not be audited because the spec was a prompt and no
+artifact survived. This time the spec was written to a file first. Its errors, so they are on the
+record:
+
+1. **It stated the `0...2B` bound on a `Fragment` only as a description, never as an
+   obligation.** The spec's type definition does carry `// 0...2B items` on both cases, so the
+   first version of this paragraph -- which said the spec "never stated" the bound -- was itself
+   false, and both the main conversation and round 5 caught it independently. The real gap is that
+   nothing in the spec said *who enforces* it or that anything could violate it, so it read as a
+   property the type already had. The implementer hit it while wiring `generalPathReplace` and
+   bounded it with a helper; a cold review then pointed out the bound was still unenforced at
+   `TreeBuilder.push`, where it is now a `precondition`.
+2. **"the last element of the last left fragment"** is the sentence that produced the seam
+   narrowing above. Read literally it is what the implementation does; what the design meant was
+   the last chunk in document order, which is not the same thing when the bound lands at a leaf
+   edge.
+3. **"`concatNodes` and `rewrap` become thin wrappers"** -- `rewrap` had zero callers after the
+   rewrite and was deleted. The spec's own test list anticipated this and said to re-point the
+   test rather than delete it, which is what happened (`rewrapOverflowBranchDeterministic` ->
+   `interiorOverflowBranchDeterministic`).
+
+Also deviating from the M1.1b design, deliberately: the design's `push(subtree:)` comment says
+"O(1) amortised", which describes a per-height-slot builder. The shipped join is the prototype's
+right-spine descent, which is O(height difference) per push and O(h) for a monotone-height
+fragment run. The measurement above is of that shape, and it met the target, so the O(1) claim
+was not chased.
+
+**Review rounds.** Five, on batches of 802, 89, 19, 23 and 316 lines (added lines, one
+convention for all five). Round 1 found the corruption defect above plus three others. Round 2
+found that the fix for it was not regression-tested, which is the finding that produced the known
+gap. Round 3 read the comment recording that gap and found nothing to change. Round 4 read the
+leaf-coalesce-guard removal: it found no correctness defect -- and got there by constructing a
+worse case than stage 1's, a non-root leaf of six single-byte chunks driven to **one** item
+because two coalescing blocks fire in sequence on the same edit, then tracing it through
+`combineUnderflowedSiblings` to show the repair still lands in `[B, 2B]` -- but it caught four
+stale comments the removal had left behind, including a pair of counts quoted from before the
+change. It missed a fifth, in `tryLeafLocalReplace`'s vanished-run block, which still said the
+merge happened "under the same item-count guard the two blocks below use" after that guard had
+been deleted from all three blocks. **Exactly one round had the chance in its own batch and
+missed it** -- round 4, the one that read the removal. The sentence was *true* until that batch
+deleted the guard, so rounds 1-3 had nothing to catch, and rounds 5 and 6 were given prose batches
+that did not contain this file at all. Round 6 found it anyway, and how it got there is the part
+worth keeping: it was checking a claim *this record* made about the code ("four stale comments the
+removal had left behind") against the code itself, and walked out of its assigned batch to do it.
+A record that describes code gives the next reviewer a reason to go and read that code, which is
+an argument for writing the description down even when it is the thing that turns out to be
+wrong. An earlier version of this paragraph said "four rounds of cold reading
+missed" it, which inflated the failure by counting rounds that could not have seen it; round 7
+caught that, in a paragraph whose whole subject is records getting their own review history wrong.
+The lesson survives the correction and is the cheaper one anyway: when a named thing is deleted,
+grep for the name rather than relying on the next reviewer to notice its ghost in prose. Round 5 read this
+record and the comment fixes, and found four more things, listed in the
+terminator paragraph below. **An earlier version of this paragraph said "three rounds" and
+described only the first three**, because the guard-removal section was inserted later and this
+summary was not updated with it; round 5 caught that, which is the second time in two milestones
+that a record's own summary of its review history was the thing that was wrong.
+
+**Declined, with reasons.** Reaching the true boundary chunk through a `.nodes` fragment: the
+measurement above, deferred to M1.2. Round 3 found nothing to change in the code and two things
+worth recording instead: the new `#expect(rope.height == 0, ...)` sits before the first append
+while its sibling test puts the analogous check after it -- moot for a 40-byte fixture, and a
+placement preference rather than a fact; and that assertion cannot be shown by any production
+mutation to add coverage, because deleting an assertion can only reduce coverage, never redden a
+green suite. Its value is as a tripwire against a future *fixture* edit, which is what its
+siblings are for as well, and that is worth saying out loud rather than assuming. Round 3 also
+re-derived the corruption mechanism independently and confirmed it: `Chunk.init` snapshots
+`packedSummary` with the same `scanSummary` that `recomputedSummaryFromBytes()` later re-runs
+over the same stored bytes, so the two agree by construction whether or not those bytes are valid
+UTF-8, and `Chunk.init`'s own precondition checks only that the run *ends* on a scalar boundary,
+never that it starts on one.
+
+Round 5 read this record and found four things. Three were facts and are fixed above: the review-
+round count, the spec attribution, and the fast-path headline number. The fourth was a Markdown
+bug -- a paragraph line sitting directly against the `---` divider below, which CommonMark parses
+as a setext heading rather than as prose, so this milestone's closing sentence would have rendered
+as a heading. Fixed by a blank line, and worth recording because it is the only defect in this
+milestone that no amount of reading the *code* could have found. Two further findings are recorded
+and not acted on: that two different noise-floor percentages appear for "this machine" (they are
+two different benchmarks, and the text now says which is which, but the reviewer's preference was
+for one figure), and that the 96.8 us baseline sits 20% below stage 1's 120.6 us for nearly the
+same code (explained above as cross-binary variance, against the 94-352 us spread `CLAUDE.md`
+records -- with the caveat stated up there, not here, that the note names no *specific* operation
+or size -- and not re-run to prove it).
+
+Round 6 then read the corrections themselves and found two facts to fix -- both are fixed above --
+plus two it recorded and I did not act on: that the `B` sweep table's 2.69 us for B = 6 is a
+fourth fast-path number in this record without a sentence tying it to the 2.57 headline the way
+the other three are tied together (it is the same configuration measured in a different binary,
+which the surrounding text already establishes, so this is a clarity preference rather than a
+wrong fact); and that "both the main conversation and round 5 caught it independently" is
+unfalsifiable from any artifact, which is true, and it stays because the point of the sentence is
+that the spec artifact existed to be checked at all. Rounds 7, 8 and 9 then read the corrections to the corrections, and each of the first two found a
+real fact: round 7, that "four rounds of cold reading missed" the stale comment was inflated
+arithmetic (the comment was true until round 4's own batch deleted the guard) and that the
+"for this operation" overstatement had survived verbatim in a second paragraph; round 8, that
+"round 6 found it" and "rounds 5 and 6 read prose batches that did not contain this file" were
+contradictory without the missing piece. All three are fixed above. Round 9 found nothing to
+change and recorded one thing: that the closing observation about records sending reviewers to the
+code generalises from a single instance, which is true -- it is an argument, not a measurement,
+and it stays because it is labelled as one. Five of the nine rounds found something in the prose
+rather than the code, and that is the honest shape of this milestone: the code converged after
+round 4 and the *record* took five more rounds to stop being wrong about itself. These paragraphs
+transcribe rounds 5 through 9; they are the loop's terminator, not a new batch.
 
 ---
 
@@ -2273,33 +2604,47 @@ observations and not a rule.
 
 ---
 
-## Handover: how to resume, updated 2026-09-08
+## Handover: how to resume, updated 2026-09-08 (stage 2)
 
 **Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the
 whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
-- **State**: M0, M1.1 and **M1.1b stage 1** are done, each with a record in section 11. The
-  gate is green (`Test run with 87 tests in 13 suites passed`). The working tree is clean.
-  A single-scalar insert into 1 MB now costs **3.18 us**, down from 120.6 us.
-- **Next work item**: **M1.1b stage 2** -- `Fragment` + `TreeBuilder` replacing the general
-  path, deleting `buildFromNodes` and `Rope.concatMergingSeam`, then the `B` re-sweep with an
-  iteration benchmark added. The design is the `#### M1.1b` subsection of the M1.1 record; the
-  join prototype and its cautions are in `dev/spikes/m1.1b-rope-edit-path/`. Stage 1's record
-  lists two things deferred *into* stage 2 on purpose: whether to drop the leaf coalesce guard
-  now that underflow repair absorbs it, and the join-point pair `combineUnderflowedSiblings`
-  leaves un-checked. Both are fill questions and both want measuring alongside the `B` sweep,
-  not before it. Then M1.2 (byte/char/UTF-16/line conversions, and a bottom-up bulk loader --
-  `Rope(String)` runs at ~91 MB/s today), M1.3 markers, M1.4 interval tree, M1.5 undo.
+- **State**: M0, M1.1 and **both stages of M1.1b** are done, each with a record in section 11.
+  The gate is green (`Test run with 96 tests in 13 suites passed`). The working tree is clean.
+  A single-scalar insert into 1 MB costs **2.6 us** on the fast path and **12.8 us** through the
+  general path, the latter down from 96.8 us. `B` was re-swept on the new implementation and
+  **kept at 6**; the table and the reasoning are in the stage 2 record, so do not redo it --
+  except when the lazy cursor lands, which is the one event that could move the answer.
+- **Next work item**: **M1.2** -- byte/char/UTF-16/line conversions, plus the two things stage 2
+  measured and left for it: a **bottom-up bulk loader** (`Rope(String)` still runs at ~91 MB/s
+  because `SumTree.build` halves recursively through `concat`) and a **lazy cursor**
+  (`SumTree.items()`/`Rope.chunks()` flatten the whole tree into an array; that is the only
+  traversal primitive there is, and stage 2's iteration benchmark measures it at 6.4 ns/chunk).
+  Then M1.3 markers, M1.4 interval tree, M1.5 undo.
+- **Three things stage 2 deferred on purpose, each with its measurement in the record** -- do not
+  rediscover them as new: the seam merge declines when the boundary chunk is buried in a
+  `Fragment.nodes` group (bounded, ~12% fill cost on a boundary-aligned pattern, better than the
+  old code on a scattered one; fix direction recorded); the join-point pair
+  `combineUnderflowedSiblings` creates is still unchecked, and fixing it means giving `Summable`
+  an item-merge hook, which wants M1.4's second `Item` type to vote; and the two scalar-boundary
+  `precondition`s in `generalPathReplace` have **no regression test** -- deleting either leaves
+  all 96 tests green, because every randomised test draws offsets from `scalarBoundaries`.
+  Asserting a trap needs an out-of-process crash harness this project does not have; the repro in
+  the record is its first case if one is ever built.
 - **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`.
-  Do not skip the trailing re-review; M1.1's worst defects were all found after the gate was
-  already green, and two of them were introduced by the fixes for the first one. Stage 1 ran
-  five review rounds on batches of 704, 204, 145, 40 and 17 **added lines** (one convention,
-  counted the same way for all five -- an earlier version of this line mixed two and a cold
-  read caught it). The fourth still found a false claim, and **two of its four real defects
-  were errors in the task spec rather than in the implementation**, so read a returned finding
-  as evidence about the spec too. A sixth round, on the milestone record itself, found three
-  more.
-- `dev/mutate.py` is the harness for step 5. Read its header before trusting a survivor.
+  Do not skip the trailing re-review. Stage 2 ran five rounds on batches of 802, 89, 19, 23 and
+  316 **added lines**, and **round 1 found a high-severity defect that the whole green gate could not
+  see**: the rewrite had dropped a scalar-boundary `precondition`, turning a loud programmer-error
+  trap into silent corruption of the user's text that `checkTreeInvariants()` structurally cannot
+  detect. Rounds 2 and 4 each found something real on batches under 100 lines, and round 5 -- the
+  one the record itself was owed -- found three false claims *in this record*, one of which was its
+  own count of how many rounds had run. Read a returned
+  finding as evidence about the **task spec** too -- stage 1 had two such, and stage 2 had three,
+  listed in its record.
+- `dev/mutate.py` is the harness for step 5. Read its header before trusting a survivor. Stage 2
+  ran its mutations by hand instead (file backup, targeted edit, `touch`, restore, `diff` against
+  the backup to prove the restore was byte-exact); the table of what survived and why is in the
+  record, and two survivors were real coverage gaps that produced two new tests.
 
 ## Handover: state after M0, 2026-09-06
 
