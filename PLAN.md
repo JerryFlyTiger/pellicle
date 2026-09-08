@@ -1733,6 +1733,20 @@ general path, deleting `buildFromNodes` and `Rope.concatMergingSeam`, and the `B
 with an iteration benchmark. The general `split`/`concat` path is untouched and still
 O(B*h^2); it now runs only for edits inserting more than 64 bytes or spanning a leaf boundary.
 
+**What was and was not cold-read, stated because the rule here is easy to satisfy in spirit
+and miss in letter.** Five rounds covered every line of `Sources/` and `Tests/` in this
+milestone, and the fifth found nothing to change, which is what ended the loop. **This record
+itself was written and committed without one.** The loop's base case exempts a record entry
+that transcribes a round's declined findings -- but only that; the moment it makes a new claim
+about the code it is a batch again, and this record makes many (the measurement table, the
+`combineUnderflowedSiblings`/`collapseRoot` mechanism, what each mutation did). So it was owed
+a round and did not get one at commit time. It got one immediately afterwards instead, and
+that round's outcome is recorded below rather than being quietly folded in.
+
+**These commits are local.** Nothing in this repository has ever been pushed: `origin/main`
+still sits six commits behind, at the state before M1.1. That is the standing arrangement, not
+an oversight -- but it means the only copy of this work is this machine.
+
 ---
 
 ## Icon, 2026-09-07 (out of milestone order, at the owner's request)
