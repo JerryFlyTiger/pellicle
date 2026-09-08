@@ -41,17 +41,20 @@ package struct Rope: Sendable, Equatable {
 
     /// Test-only: builds a rope directly from already-formed chunks via `SumTree.init(items:)`
     /// (a single leaf when `chunks.count <= 2 * branchingFactor`), skipping `packChunks` and
-    /// `concatMergingSeam` entirely. `internal`, not `package`: reached only via `@testable
-    /// import Text` from `ropeTests.swift`, which needs it to build a *root* leaf holding two
-    /// adjacent chunks whose sum is `<= 64`.
+    /// the general path's seam-merge policy entirely. `internal`, not `package`: reached only
+    /// via `@testable import Text` from `ropeTests.swift`, which needs it to build a *root*
+    /// leaf holding two adjacent chunks whose sum is `<= 64`.
     ///
     /// An earlier version of this comment said that pair is "a shape no edit path can
     /// produce". That is false, and the counter-evidence was already in the tree: the Part D
-    /// scan in `ropeTests.swift` counts 15 such adjacent pairs in the large band and 2 in the
-    /// small band after an ordinary randomised run. Coalescing is leaf-local and guarded, so
-    /// at least two things leave such a pair standing — the `isWholeLeaf || newItems.count >
-    /// branchingFactor` guard declining a merge that would push a non-root leaf under the
-    /// floor, and `SumTree`'s `combineUnderflowedSiblings`, which concatenates two sibling
+    /// scan in `ropeTests.swift` counts **19** such adjacent pairs in the large band and 6 in
+    /// the small band after an ordinary randomised run (15 and 2 when that sentence was first
+    /// written, before M1.1b stage 2; re-measured here rather than carried over, because this
+    /// comment block has twice been rewritten for stating something it had not checked).
+    /// Coalescing is leaf-local, so two things still leave such a pair standing — the coalesce
+    /// does not iterate to a fixpoint, so a merge product is never re-examined against the
+    /// neighbour beyond the one it just absorbed; and `SumTree`'s `combineUnderflowedSiblings`,
+    /// which concatenates two sibling
     /// leaves' items during underflow repair with no awareness of the `<= 64` policy at all,
     /// so nothing ever inspects the pair it creates at the join — that path can even leave
     /// such a pair in a *root* leaf, by merging two sibling leaves and then collapsing the
@@ -112,37 +115,57 @@ package struct Rope: Sendable, Equatable {
         SumTree<Chunk>(items: Rope.packChunks(bytes))
     }
 
-    /// Builds a tree from already-packed chunks, merging the two chunks at the seam
-    /// (`left`'s last chunk, `right`'s first chunk) into one when they fit in 64 bytes
-    /// together. This is the chunking policy's other half: without it, many small edits at
-    /// the same place leave many undersized chunks.
-    private static func concatMergingSeam(_ left: SumTree<Chunk>, _ right: SumTree<Chunk>)
-        -> SumTree<Chunk>
-    {
-        guard !left.isEmpty, !right.isEmpty else {
-            return SumTree.concat(left, right)
+    /// The two bytes-arrays of `a` and `b` concatenated into one `Chunk` — the seam-merge
+    /// policy's actual byte work, shared by both directions it is applied in below.
+    private static func mergedChunk(_ a: Chunk, _ b: Chunk) -> Chunk {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(Int(a.count) + Int(b.count))
+        a.withUnsafeBytes { bytes.append(contentsOf: $0) }
+        b.withUnsafeBytes { bytes.append(contentsOf: $0) }
+        return Chunk(bytes: bytes)
+    }
+
+    /// The seam-merge policy's trailing side: if `fragments`' last chunk is directly
+    /// accessible — the last element of a plain `Fragment.items` group, not buried inside a
+    /// `Fragment.nodes` subtree — and it fits with `chunk` in 64 bytes together, removes it
+    /// from `fragments` and returns the merged replacement; otherwise leaves `fragments`
+    /// untouched and returns `nil`. A `Fragment.nodes` group is declined rather than walked
+    /// into: that would reintroduce a cursor descent into a subtree this rewrite specifically
+    /// avoids walking twice, in exchange for a merge this policy already treats as an
+    /// optimisation, not a correctness requirement (see `generalPathReplace`'s doc comment).
+    private static func mergeTrailingSeam(
+        _ fragments: inout [Fragment<Chunk>], with chunk: Chunk
+    ) -> Chunk? {
+        guard case .items(let slice)? = fragments.last, let last = slice.last else { return nil }
+        // mutation focus: the seam `<= 64` comparison, trailing side.
+        guard Int(last.count) + Int(chunk.count) <= 64 else { return nil }
+        let merged = Rope.mergedChunk(last, chunk)
+        let remainder = slice.dropLast()
+        if remainder.isEmpty {
+            fragments.removeLast()
+        } else {
+            fragments[fragments.count - 1] = .items(remainder)
         }
-        // Extract left's last chunk and right's first chunk with `cut`, which (unlike
-        // `split`) isolates exactly one item regardless of where in the tree it falls —
-        // see `cutNode`'s doc comment for why `split` cannot do this for a *last* item.
-        guard let (leftRest, leftLast, _, _) = left.cut(where: { $0.utf8 >= left.summary.utf8 })
-        else {
-            return SumTree.concat(left, right)
+        return merged
+    }
+
+    /// The seam-merge policy's leading side, symmetric with `mergeTrailingSeam` above.
+    private static func mergeLeadingSeam(
+        _ fragments: inout [Fragment<Chunk>], with chunk: Chunk
+    ) -> Chunk? {
+        guard case .items(let slice)? = fragments.first, let first = slice.first else {
+            return nil
         }
-        guard let (_, rightFirst, _, rightRest) = right.cut(where: { $0.utf8 >= 1 }) else {
-            return SumTree.concat(left, right)
+        // mutation focus: the seam `<= 64` comparison, leading side.
+        guard Int(chunk.count) + Int(first.count) <= 64 else { return nil }
+        let merged = Rope.mergedChunk(chunk, first)
+        let remainder = slice.dropFirst()
+        if remainder.isEmpty {
+            fragments.removeFirst()
+        } else {
+            fragments[0] = .items(remainder)
         }
-        let combinedCount = Int(leftLast.count) + Int(rightFirst.count)
-        guard combinedCount <= 64 else {
-            return SumTree.concat(left, right)
-        }
-        var combinedBytes: [UInt8] = []
-        combinedBytes.reserveCapacity(combinedCount)
-        leftLast.withUnsafeBytes { combinedBytes.append(contentsOf: $0) }
-        rightFirst.withUnsafeBytes { combinedBytes.append(contentsOf: $0) }
-        let mergedChunk = Chunk(bytes: combinedBytes)
-        let mergedTree = SumTree<Chunk>(items: [mergedChunk])
-        return SumTree.concat(SumTree.concat(leftRest, mergedTree), rightRest)
+        return merged
     }
 
     // MARK: - Queries
@@ -333,7 +356,11 @@ package struct Rope: Sendable, Equatable {
     /// The path-copy leaf-local edit path (M1.1b stage 1): when the whole edit — the
     /// removed range plus `bytes` — fits inside one leaf, rewrites that leaf directly via
     /// `SumTree.pathCopyEdit`, touching only the `O(h)` nodes on the path to it instead of
-    /// the `O(B * h^2)` `split`+`concat` fallback (see `SumTree.swift`'s file header).
+    /// falling back to `generalPathReplace`'s two `O(h)` `splitFragments` descents plus one
+    /// `O(h)` `TreeBuilder` join (M1.1b stage 2 — see `SumTree.swift`'s file header; before
+    /// that round this fallback was `O(B * h^2)`, not `O(h)`, which was this fast path's
+    /// original reason to exist and still is: a constant number of `O(h)` walks is cheaper
+    /// than one, just not by the same margin the old fallback made it look).
     /// Returns `true` if it performed the edit; `false` if it declined, in which case
     /// `self` is left byte-identical and the caller must fall back to the general path.
     /// `package`, not `private`: a test asserts this fast path is actually taken on a
@@ -368,7 +395,6 @@ package struct Rope: Sendable, Equatable {
         let lowerBound = range.lowerBound
         let upperBound = range.upperBound
         let total = utf8Count
-        let isWholeLeaf = tree.height == 0
         let predicate: (TextSummary) -> Bool =
             lowerBound < total
             ? { $0.utf8 > lowerBound }
@@ -426,12 +452,10 @@ package struct Rope: Sendable, Equatable {
                         // The whole replaced run vanished (e.g. deleting exactly one whole
                         // chunk's byte span): `index - 1` and `index` are now adjacent in
                         // `newItems` where they were not before, so try to coalesce them
-                        // under the same item-count guard the two blocks below use. Handle
+                        // on the same terms as the two blocks below. Handle
                         // the removed run having been at the very start (no left neighbour)
                         // or the very end (no right neighbour) of the leaf.
-                        if index > 0, index < newItems.count,
-                            isWholeLeaf || newItems.count > branchingFactor
-                        {
+                        if index > 0, index < newItems.count {
                             let preceding = newItems[index - 1]
                             let following = newItems[index]
                             if Int(preceding.count) + Int(following.count) <= 64 {
@@ -452,16 +476,25 @@ package struct Rope: Sendable, Equatable {
                     }
 
                     // Coalescing: merge the new run's last chunk with the item following
-                    // it, and its first chunk with the item preceding it, when the pair
-                    // fits in 64 bytes together — but only while the leaf keeps at least
-                    // `branchingFactor` items afterward, unless the leaf is the whole tree
-                    // (see `branchingFactor`'s doc comment in `SumTree.swift` for why the
-                    // guard exists at all).
+                    // it, and its first chunk with the item preceding it, whenever the pair
+                    // fits in 64 bytes together. **Unconditionally** — an earlier version
+                    // also required the leaf to keep at least `branchingFactor` items
+                    // afterward unless it was the whole tree. M1.1b stage 2 measured that
+                    // guard and removed it: it is not a correctness defence (stage 1's
+                    // mutation pass showed a relaxed guard genuinely takes a leaf from 6
+                    // items to 5 and no test fails, because `pathCopyEditNode`'s underflow
+                    // repair absorbs it), and dropping it improves fill at no measured cost
+                    // — over 40,000 sustained fast-path edits, adjacent chunk pairs summing
+                    // to <= 64 fell from 176 to 56 and mean fill rose from 45.5 to 47.0, with
+                    // the single-insert benchmark moving in opposite directions at 1 MB and
+                    // 10 MB inside a noise band, i.e. showing no cost rather than a gain. On
+                    // the mixed randomised workload the picture is different and is recorded
+                    // too: the Part D pair count is 25 either way, redistributed 25/0 to 19/6
+                    // across the two bands rather than reduced. The fill gain is real on a
+                    // fast-path-dominated workload and a wash on a mixed one.
                     let runStart = index
                     let runEnd = runStart + newChunks.count
-                    if runEnd < newItems.count,
-                        isWholeLeaf || newItems.count > branchingFactor
-                    {
+                    if runEnd < newItems.count {
                         let last = newItems[runEnd - 1]
                         let following = newItems[runEnd]
                         if Int(last.count) + Int(following.count) <= 64 {
@@ -473,7 +506,7 @@ package struct Rope: Sendable, Equatable {
                                 (runEnd - 1)...runEnd, with: [Chunk(bytes: combined)])
                         }
                     }
-                    if runStart > 0, isWholeLeaf || newItems.count > branchingFactor {
+                    if runStart > 0 {
                         let first = newItems[runStart]
                         let preceding = newItems[runStart - 1]
                         if Int(preceding.count) + Int(first.count) <= 64 {
@@ -516,14 +549,168 @@ package struct Rope: Sendable, Equatable {
         generalPathReplace(byteRange, with: other)
     }
 
-    /// The general `split`+`concat` path's body, shared by `replaceSubrange(_:with:)` (once
+    /// Pushes `chunks` into `builder` in groups of at most `2B`, the bound `Fragment.items`
+    /// carries in its doc comment: `chunks` here can be arbitrarily long (the untouched
+    /// straddling remainders plus a small `other`'s own items, concatenated), and a single
+    /// `Fragment.items` over more than `2B` of them would hand `TreeBuilder` a leaf-shaped
+    /// argument its own contract does not allow — see `SumTree.swift`'s `Fragment` doc
+    /// comment for why the bound exists at all.
+    private static func pushChunks(
+        _ chunks: ArraySlice<Chunk>, into builder: inout TreeBuilder<Chunk>
+    ) {
+        var remaining = chunks
+        while !remaining.isEmpty {
+            let end = remaining.index(
+                remaining.startIndex, offsetBy: min(2 * branchingFactor, remaining.count))
+            builder.push(.items(remaining[remaining.startIndex..<end]))
+            remaining = remaining[end...]
+        }
+    }
+
+    /// The general path's body (M1.1b stage 2), shared by `replaceSubrange(_:with:)` (once
     /// the fast path has declined) and `replaceSubrangeGeneralPathOnly` below, so the two
     /// can never diverge — see that function's doc comment for why divergence would be
     /// silent rather than a build error.
+    ///
+    /// Two `splitFragments` descents into the **original**, unmodified `tree` — one at
+    /// `range.lowerBound`, one at `range.upperBound` — replace the six cursor walks
+    /// (`splitTree`×2, each a `cut`, plus `concatMergingSeam`×2, each two more `cut`s) the
+    /// old `splitTree`+`concatMergingSeam` implementation needed, with two. The straddling
+    /// chunk each descent returns is sliced by hand exactly as `splitTree` slices one today;
+    /// the untouched remainder of each becomes a `Fragment.items` pushed alongside the
+    /// per-level groups the descent already collected, and the seam-merge policy (merge an
+    /// adjacent pair when they fit in 64 bytes together) is applied once on each side of the
+    /// inserted run via `mergeTrailingSeam`/`mergeLeadingSeam` before any of it is pushed
+    /// into the one `TreeBuilder` that replaces both old `concat` calls.
+    ///
+    /// `other` is handled two ways, chosen by whether it is small enough to seam-merge at
+    /// all: when `other.tree` is a single leaf (`height == 0`, `<= 2B` chunks — comfortably
+    /// the common case, a `Chunk` alone holds up to 64 bytes), its items are flattened
+    /// alongside the two straddling remainders and both seams are attempted normally. A
+    /// taller `other` is pushed as a whole subtree (`push(subtree:)`, no flattening) with no
+    /// seam merge attempted at either of its two ends, for the same reason
+    /// `mergeTrailingSeam`/`mergeLeadingSeam` decline a boundary chunk buried inside a
+    /// `Fragment.nodes` group: reaching `other`'s actual first/last chunk would mean walking
+    /// into it, which is exactly the extra cursor work this rewrite exists to stop doing.
+    ///
+    /// This is a real, intentional narrowing from the old `concatMergingSeam` (which used
+    /// `cut` and so found the true last/first chunk regardless of tree shape, on every call,
+    /// including into `other`) — `checkTreeInvariants()` cannot observe it (a merge this
+    /// declines still leaves a perfectly valid, just marginally less packed, tree) and
+    /// `fragmentationGuard` does not either at its 24-byte floor (most of that test's edits
+    /// are single-byte inserts the fast path takes, never reaching here at all; see this
+    /// file's report for why this was not chased with an exact-shape test instead). A second
+    /// narrowing, also not chased: the old implementation could chain two merges into one
+    /// chunk when `other` was itself a single small chunk (its first merge's output became
+    /// its second merge's input); this implementation applies the two seams independently
+    /// except when the flattened middle run has exactly one chunk, where the same chaining
+    /// still happens because both merges act on that one array slot in sequence.
     private mutating func generalPathReplace(_ range: Range<Int>, with other: Rope) {
-        let (before, rest) = Rope.splitTree(tree, at: range.lowerBound)
-        let (_, after) = Rope.splitTree(rest, at: range.upperBound - range.lowerBound)
-        tree = Rope.concatMergingSeam(Rope.concatMergingSeam(before, other.tree), after)
+        var prefixFragments: [Fragment<Chunk>] = []
+        var discardedRight: [Fragment<Chunk>] = []
+        let lowerFlip = splitFragments(
+            tree.root, prefix: .identity, where: { $0.utf8 > range.lowerBound },
+            left: &prefixFragments, right: &discardedRight)
+
+        var discardedLeft: [Fragment<Chunk>] = []
+        var suffixFragments: [Fragment<Chunk>] = []
+        let upperFlip = splitFragments(
+            tree.root, prefix: .identity, where: { $0.utf8 > range.upperBound },
+            left: &discardedLeft, right: &suffixFragments)
+
+        // The two `precondition`s below are the general path's scalar-boundary contract (see
+        // this file's header): a non-boundary offset is a programmer error and traps rather
+        // than silently truncating a scalar. They are restored here because M1.1b stage 2's
+        // first version omitted them, and omitting them is **silent data corruption, not a
+        // loud failure**: `removeSubrange(0..<1)` on `Rope("é" + String(repeating: "m",
+        // count: 100))` stored a chunk beginning with the lone continuation byte `0xA9`,
+        // decoding to U+FFFD, while `checkTreeInvariants()` passed — a chunk's cached summary
+        // and its recomputed summary are both derived from the same corrupted bytes, so they
+        // agree and the tree oracle cannot see it.
+        //
+        // **Nothing regression-tests these two lines.** A cold review checked, and every
+        // randomised and differential test in `ropeTests.swift` draws its offsets from
+        // `scalarBoundaries`, so none can present a non-boundary offset to this path;
+        // asserting the trap itself needs an out-of-process crash harness, which this project
+        // does not have yet (`PLAN.md`'s M1.1b stage 2 record carries this as a known gap,
+        // with the repro above as its first case). Deleting either line leaves the suite
+        // green. Do not treat their survival of a mutation run as evidence that they are
+        // unnecessary.
+        var leftPiece: Chunk?
+        if let (chunk, itemPrefix) = lowerFlip {
+            let localOffset = range.lowerBound - itemPrefix.utf8
+            if localOffset > 0 {
+                precondition(
+                    Rope.isChunkLocalScalarBoundary(chunk, localOffset),
+                    "byte offset \(range.lowerBound) is not a scalar boundary")
+                var bytes: [UInt8] = []
+                chunk.withUnsafeBytes { bytes = Array($0[0..<localOffset]) }
+                leftPiece = Chunk(bytes: bytes)
+            }
+        }
+        var rightPiece: Chunk?
+        if let (chunk, itemPrefix) = upperFlip {
+            let localOffset = range.upperBound - itemPrefix.utf8
+            if localOffset < Int(chunk.count) {
+                precondition(
+                    Rope.isChunkLocalScalarBoundary(chunk, localOffset),
+                    "byte offset \(range.upperBound) is not a scalar boundary")
+                var bytes: [UInt8] = []
+                chunk.withUnsafeBytes { bytes = Array($0[localOffset...]) }
+                rightPiece = Chunk(bytes: bytes)
+            }
+        }
+
+        var builder = TreeBuilder<Chunk>()
+
+        if !other.tree.isEmpty, other.tree.height > 0 {
+            // Large `other`: push its subtree directly (no flattening, no seam merge — see
+            // this function's doc comment).
+            for fragment in prefixFragments { builder.push(fragment) }
+            if let leftPiece { builder.push(.items(ArraySlice([leftPiece]))) }
+            builder.push(subtree: other.tree.root)
+            if let rightPiece { builder.push(.items(ArraySlice([rightPiece]))) }
+            for fragment in suffixFragments { builder.push(fragment) }
+        } else {
+            // `other` is empty or a single leaf: flatten it (at most `2B` chunks) alongside
+            // the two straddling remainders and attempt both seams normally.
+            var middle: [Chunk] = []
+            if let leftPiece { middle.append(leftPiece) }
+            middle.append(contentsOf: other.tree.items())
+            if let rightPiece { middle.append(rightPiece) }
+
+            if middle.isEmpty {
+                // Nothing survives between the prefix and the suffix: the only seam is
+                // directly between what remains of each.
+                if let firstFragment = suffixFragments.first,
+                    case .items(let slice) = firstFragment,
+                    let head = slice.first,
+                    let merged = Rope.mergeTrailingSeam(&prefixFragments, with: head)
+                {
+                    let remainder = slice.dropFirst()
+                    if remainder.isEmpty {
+                        suffixFragments.removeFirst()
+                    } else {
+                        suffixFragments[0] = .items(remainder)
+                    }
+                    prefixFragments.append(.items(ArraySlice([merged])))
+                }
+            } else {
+                if let merged = Rope.mergeTrailingSeam(&prefixFragments, with: middle[0]) {
+                    middle[0] = merged
+                }
+                let lastIndex = middle.count - 1
+                if let merged = Rope.mergeLeadingSeam(&suffixFragments, with: middle[lastIndex]) {
+                    middle[lastIndex] = merged
+                }
+            }
+
+            for fragment in prefixFragments { builder.push(fragment) }
+            if !middle.isEmpty { Rope.pushChunks(middle[...], into: &builder) }
+            for fragment in suffixFragments { builder.push(fragment) }
+        }
+
+        tree = builder.finish()
     }
 
     /// Test-only: performs the same edit as `replaceSubrange(_:with:)` but always through
@@ -554,8 +741,9 @@ package struct Rope: Sendable, Equatable {
 
     package mutating func append(_ other: Rope) {
         // Routed through `replaceSubrange` (an empty range at the very end), not a direct
-        // `concatMergingSeam` call, so this reaches `tryLeafLocalReplace`'s fast path the
-        // same way `insert`/`removeSubrange` do, instead of duplicating the dispatch.
+        // call into `generalPathReplace`'s seam-merge logic, so this reaches
+        // `tryLeafLocalReplace`'s fast path the same way `insert`/`removeSubrange` do,
+        // instead of duplicating the dispatch.
         replaceSubrange(utf8Count..<utf8Count, with: other)
     }
 

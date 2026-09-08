@@ -37,26 +37,32 @@
 /// with each other: a `>=`-style predicate compared against a tree's own total summary finds
 /// the *last* item either way, but only `cut` can hand that single item back on its own —
 /// `split`, by construction, always folds the triggering item into its left-hand result, so
-/// it can never isolate a tree's last item alone (see `cutNode`'s doc comment). `find` is
-/// `cut` without the two halves: genuinely O(h), because it descends without ever calling
-/// `buildFromNodes` (see `findNode`'s doc comment) — the only one of the four primitives for
-/// which the O(log n) claim below already holds. Bulk build from a sequence of items is
+/// it can never isolate a tree's last item alone (see `splitFragments`'s doc comment, which
+/// now carries this same distinction). `find` is `cut` without the two halves: genuinely
+/// O(h), because it descends without ever allocating, copying or rebuilding any part of the
+/// tree (see `findNode`'s doc comment) — cheaper even than `split`/`cut`'s O(h), which still
+/// builds O(h) worth of new nodes. Bulk build from a sequence of items is
 /// implemented on top of `concat` by recursive halving, which is simpler than a bespoke
 /// bulk-loader and inherits `concat`'s correctness.
 ///
-/// **`concat` is O(log n) in the taller tree's height; `split`/`cut` are not, yet, despite
-/// an earlier version of this comment calling all three "O(log n)".** `splitNode`/`cutNode`
-/// call `buildFromNodes` at *every level* of their descent, and `buildFromNodes` folds
-/// `concatNodes` across up to `B + 1` sibling nodes, each fold being O(h) and copying arrays
-/// of up to 12 `Node`s — so a single cursor walk does O(B · h²) node reconstructions, not
-/// O(h). Measured on a 1 MB rope: `Rope.isScalarBoundary` (one `cut`, nothing else) costs
-/// 131 µs, and inserting one byte costs ~400 node reconstructions for what a persistent
-/// B-tree insert should do in ~5 (see `M1.1-perf-findings.md`). Round 2 of M1.1 is what
-/// makes the O(log n) claim true, by replacing `buildFromNodes`'s per-level fold with a
-/// path-copy edit that joins the accumulated left/right subtree lists once, bottom-up; that
-/// rewrite is out of this round's scope. Do not delete this paragraph once round 2 lands —
-/// update it to describe the code as it then is (see `Rope.locate`'s doc comment for the
-/// same claim, made about the caller).
+/// **`concat`, `split` and `cut` are all O(h) in the tree's height** (M1.1b stage 2; an
+/// earlier version of this comment measured `split`/`cut` at O(B · h²), before this round).
+/// The fix was not making the descent itself cheaper — `splitNode`/`cutNode`'s single
+/// descent was already O(h) — but replacing what happened *after* it: they called
+/// `buildFromNodes` at every level to fold `concatNodes` across up to `B + 1` sibling nodes,
+/// each fold being O(h) and copying arrays of up to 12 `Node`s, so a single cursor walk did
+/// O(B · h²) node reconstructions for O(h) worth of real work. `split`/`cut` are now
+/// `splitFragments` (one descent, still O(h), but it only *slices* the per-level sibling
+/// groups into `Fragment`s rather than rebuilding them) followed by pushing those fragments
+/// into a `TreeBuilder`: at most two fragments per level, so O(h) fragments in total, and
+/// `TreeBuilder.push`'s right-spine join costs O(height difference) per push — which sums to
+/// O(h) for the whole monotone-height run a `splitFragments` call produces (see
+/// `TreeBuilder`'s doc comment for why this is not the O(1)-amortised cost a per-height-slot
+/// builder would have, and why that distinction does not matter here). Measured before this
+/// round, on a 1 MB rope: `Rope.isScalarBoundary` (one `cut`, nothing else) cost 131 µs, and
+/// inserting one byte cost ~400 node reconstructions for what a persistent B-tree insert
+/// should do in ~5 (see `M1.1-perf-findings.md`); re-measuring this claim against the
+/// current code is the main conversation's job, not this comment's.
 ///
 /// Known gap: `split`/`cut` only ever land on **item boundaries** (whatever `Item` is — a
 /// whole `Chunk`, for the rope). Splitting *inside* an item (e.g. a byte offset in the
@@ -115,247 +121,293 @@ extension Node {
         if case .leaf(let items, _) = self { return items.isEmpty }
         return false
     }
+
+    /// Items for a leaf, children for an interior — the count `TreeBuilder`'s join checks
+    /// against `branchingFactor` to decide whether a node (or a loose group standing in for
+    /// one) is underfull.
+    fileprivate var childCount: Int {
+        switch self {
+        case .leaf(let items, _): return items.count
+        case .interior(let children, _, _): return children.count
+        }
+    }
+
+    fileprivate var isUnderfull: Bool { childCount < branchingFactor }
 }
 
 /// The branching factor. Fixed at 6 by PLAN.md 4.5 (Zed's `sum_tree` constant).
 ///
-/// `internal`, not `private`: `Rope.swift`'s leaf-local coalescing guard (see
-/// `tryLeafLocalReplace`) must never let a leaf drop below this same bound, so it reads
-/// this constant directly rather than keeping its own copy that could drift out of sync
-/// if this one were ever changed. Deliberately not `package`: nothing outside this module
-/// needs it.
+/// `internal`, not `private`: `Rope.swift` reads it directly rather than keeping its own
+/// copy that could drift out of sync if this one were ever changed. Its reader used to be
+/// the leaf-local coalescing guard in `tryLeafLocalReplace`; M1.1b stage 2 measured that
+/// guard and removed it, and the reader is now `pushChunks`, which must not hand
+/// `TreeBuilder.push` a `Fragment` holding more than `2B` items. Deliberately not
+/// `package`: nothing outside this module needs it.
 internal let branchingFactor = 6
 
-/// Joins two trees of any heights into one, preserving every invariant. The standard
-/// two-tree-join algorithm: equal heights merge (and split again if the merge overflows
-/// `2B`); unequal heights descend into the taller tree's near child, recursing until the
-/// heights match, then splice the (possibly-grown-by-one-level) result back in.
-private func concatNodes<Item: Summable>(_ a: Node<Item>, _ b: Node<Item>) -> Node<Item> {
+/// A **transient** group of `0...2B` items or same-height nodes — never stored in a tree,
+/// only ever an argument to `TreeBuilder.push`. The type distinction is the enforcement
+/// mechanism `checkInvariants()` relies on: an underfull (or empty) group is representable
+/// as a `Fragment` and not representable as a stored `Node`, so a caller that has one on its
+/// hands (a per-level sibling group `splitFragments` peeled off mid-descent, say) is never
+/// tempted to wrap it in a `Node` and smuggle it past the checker. `case nodes` carries the
+/// common height explicitly because an empty slice cannot report one.
+package enum Fragment<Item: Summable>: Sendable {
+    case items(ArraySlice<Item>)
+    case nodes(ArraySlice<Node<Item>>, height: UInt8)
+}
+
+/// The n-ary join builder (M1.1b stage 2): accepts loose `Fragment`s or well-formed subtrees
+/// in any push order and produces one well-formed tree in `finish()`, every node of which
+/// satisfies `checkNode`'s bounds (root looseness collapsed the same way `pathCopyEdit`
+/// already does — see `collapseRoot`, reused rather than duplicated). This is what lets
+/// `split`/`cut` reconstruct both sides of a cut in one pass each, instead of `concatNodes`
+/// once per level (see the file header).
+///
+/// **Shape actually shipped, not "O(1) amortised".** A per-height-slot builder (one open
+/// node per height, closed and carried up on overflow) would be O(1) amortised per push.
+/// This is not that: each push descends the accumulator's right spine until the heights
+/// agree, then splices there, so one push costs O(height difference) and a whole
+/// monotone-height run of pushes — exactly what `splitFragments` produces, one `Fragment`
+/// per level — costs O(h) in total. That is the bound this design needs (`split`/`cut`
+/// become O(h), not O(1) per push); do not read "right-spine join" as a defect to fix.
+package struct TreeBuilder<Item: Summable>: ~Copyable {
+    private var accumulator: Node<Item>?
+
+    package init() {
+        accumulator = nil
+    }
+
+    /// Pushes a possibly-underfull-or-empty group. See `Fragment`'s doc comment for why the
+    /// looseness is legal here and only here.
+    package mutating func push(_ fragment: Fragment<Item>) {
+        switch fragment {
+        case .items(let slice):
+            // Equivalent mutant, recorded rather than chased with a test (CLAUDE.md: where a
+            // defence cannot be observed by a test, say so instead of pretending): this guard
+            // is a performance early-out, not a correctness guard. Removing it still produces
+            // `.makeLeaf([])`, which `joinNodes`'s `isEmptyLeaf` short-circuit and
+            // `normalizeLooseNode` both already treat as a no-op — no observable difference.
+            guard !slice.isEmpty else { return }  // mutation focus: empty-fragment early-out
+            precondition(slice.count <= 2 * branchingFactor, "Fragment.items exceeds 2B")
+            appendNode(.makeLeaf(Array(slice)))
+        case .nodes(let slice, _):
+            guard !slice.isEmpty else { return }  // mutation focus: empty-fragment early-out
+            precondition(slice.count <= 2 * branchingFactor, "Fragment.nodes exceeds 2B")
+            appendNode(.makeInterior(Array(slice)))
+        }
+    }
+
+    /// Pushes an already well-formed subtree (every level within its own non-root `B...2B`
+    /// bounds) — the shape `TreeBuilder.push(subtree:)`'s doc comment on the `SumTree.swift`
+    /// header promises its caller.
+    package mutating func push(subtree: Node<Item>) {
+        guard !subtree.isEmptyLeaf else { return }
+        appendNode(subtree)
+    }
+
+    private mutating func appendNode(_ node: Node<Item>) {
+        if let acc = accumulator {
+            accumulator = joinNodes(acc, node)
+        } else {
+            accumulator = normalizeLooseNode(node)
+        }
+    }
+
+    /// The tree whose in-order item sequence is the concatenation, in push order, of
+    /// everything pushed; the empty tree if nothing (or only empty fragments) was pushed.
+    package consuming func finish() -> SumTree<Item> {
+        guard let acc = accumulator else { return SumTree<Item>() }
+        return SumTree(root: SumTree.collapseRoot(acc))
+    }
+}
+
+/// Joins two trees of any heights into one well-formed node, preserving every invariant.
+/// `a` may be empty (an empty leaf); `b` may be **loose** — underfull, or an interior
+/// wrapper standing in for an unattached sibling group (exactly what `TreeBuilder.push`
+/// builds from a `Fragment`) — but must not be taller than `a` unless `a` is empty. This is
+/// `concatNodes`/`TreeBuilder`'s shared engine: there is one rebalancing implementation, not
+/// two (see the file header).
+private func joinNodes<Item: Summable>(_ a: Node<Item>, _ b: Node<Item>) -> Node<Item> {
     // Equivalent mutant, recorded rather than chased with a test (CLAUDE.md: where a defence
     // cannot be observed by a test, say so instead of pretending): removing this short-circuit
-    // changes no result. `makeLeaf([] + items)` is `makeLeaf(items)`, and the general descent
-    // below rebuilds the identical tree from an empty leaf either way — it just does
-    // measurably more work to get there (an extra fold and, at height mismatches, an extra
-    // level of recursion). This is a performance guard, not a correctness guard.
-    if a.isEmptyLeaf { return b }
+    // changes no result, only how much work the general descent below does to reach it. This
+    // is a performance guard, not a correctness guard.
     if b.isEmptyLeaf { return a }
-
-    if a.height == b.height {
-        switch (a, b) {
-        case (.leaf(let aItems, let aSummary), .leaf(let bItems, let bSummary)):
-            let combined = aItems + bItems
-            if combined.count <= 2 * branchingFactor {
-                // No overflow: the answer is just the two cached summaries added, not a
-                // re-fold of `combined`'s items from scratch.
-                return .leaf(combined, aSummary + bSummary)
-            }
-            let mid = combined.count / 2
-            let left = Node.makeLeaf(Array(combined[0..<mid]))
-            let right = Node.makeLeaf(Array(combined[mid...]))
-            return .makeInterior([left, right])
-        case (
-            .interior(let aChildren, let aSummary, let height),
-            .interior(let bChildren, let bSummary, _)
-        ):
-            let combined = aChildren + bChildren
-            if combined.count <= 2 * branchingFactor {
-                // Same reasoning as the leaf case above: no overflow, so no re-fold.
-                return .interior(combined, aSummary + bSummary, height)
-            }
-            let mid = combined.count / 2
-            let left = Node.makeInterior(Array(combined[0..<mid]))
-            let right = Node.makeInterior(Array(combined[mid...]))
-            return .makeInterior([left, right])
-        default:
-            preconditionFailure("concat: equal heights but one leaf, one interior")
-        }
-    } else if a.height > b.height {
-        guard case .interior(let aChildren, _, _) = a else {
-            preconditionFailure("concat: taller node must be interior")
-        }
-        let lastChild = aChildren[aChildren.count - 1]
-        let merged = concatNodes(lastChild, b)
-        var newChildren = Array(aChildren.dropLast())
-        if merged.height == lastChild.height {
-            newChildren.append(merged)
-        } else {
-            guard case .interior(let mergedChildren, _, _) = merged, mergedChildren.count == 2
-            else {
-                preconditionFailure("concat: unexpected growth shape")
-            }
-            newChildren.append(contentsOf: mergedChildren)
-        }
-        return rewrap(newChildren)
-    } else {
+    if a.isEmptyLeaf { return normalizeLooseNode(b) }
+    if a.height < b.height {
         guard case .interior(let bChildren, _, _) = b else {
-            preconditionFailure("concat: taller node must be interior")
+            preconditionFailure("joinNodes: taller argument must be interior")
         }
-        let firstChild = bChildren[0]
-        let merged = concatNodes(a, firstChild)
-        var newChildren = Array(bChildren.dropFirst())
-        if merged.height == firstChild.height {
-            newChildren.insert(merged, at: 0)
+        var acc = a
+        for child in bChildren { acc = joinNodes(acc, child) }
+        return acc
+    }
+    let (spliced, split) = spliceOntoRightSpine(a, b)
+    if let split { return .makeInterior([spliced, split]) }
+    return spliced
+}
+
+/// The case `joinNodes` cannot express as a recursive splice: starting an empty accumulator
+/// from a loose node has nothing well-formed to splice onto yet. A leaf, or a well-formed
+/// (non-underfull) interior, is used as-is; an underfull interior wrapper is dissolved by
+/// pushing its children in one at a time — each one individually well-formed even though
+/// the group as a whole was not (see `Fragment`'s doc comment).
+private func normalizeLooseNode<Item: Summable>(_ node: Node<Item>) -> Node<Item> {
+    guard case .interior(let children, _, _) = node, node.isUnderfull else { return node }
+    var acc = children[0]
+    for child in children.dropFirst() { acc = joinNodes(acc, child) }
+    return acc
+}
+
+/// Appends `other` onto `node`'s right spine, descending until the heights agree and
+/// splicing there; returns a right sibling if that splice overflowed `2B`. `node` is
+/// well-formed and non-empty; `other` may be loose (see `joinNodes`) but no taller than
+/// `node`.
+private func spliceOntoRightSpine<Item: Summable>(
+    _ node: Node<Item>, _ other: Node<Item>
+) -> (Node<Item>, Node<Item>?) {
+    switch node {
+    case .leaf(let items, _):
+        guard case .leaf(let otherItems, _) = other else {
+            preconditionFailure("spliceOntoRightSpine: height agreement violated at leaf level")
+        }
+        let all = items + otherItems
+        if all.count <= 2 * branchingFactor {  // mutation focus: 2B overflow test, leaf branch
+            return (.makeLeaf(all), nil)
+        }
+        let mid = all.count / 2
+        return (.makeLeaf(Array(all[0..<mid])), .makeLeaf(Array(all[mid...])))
+    case .interior(let children, _, let height):
+        var toAppend: [Node<Item>] = []
+        var newChildren = children
+        let delta = Int(height) - Int(other.height)
+        if delta == 0 {
+            // Same height: splice `other`'s children in flat. This is the step that
+            // dissolves an underfull `other` harmlessly — every one of its children is
+            // individually well-formed even though the group as a whole was not.
+            // Mutation focus: this branch vs. the `delta == 1 && !isUnderfull` branch below.
+            guard case .interior(let otherChildren, _, _) = other else {
+                preconditionFailure(
+                    "spliceOntoRightSpine: equal heights but one leaf, one interior")
+            }
+            toAppend = otherChildren
+        } else if delta == 1 && !other.isUnderfull {
+            toAppend = [other]
         } else {
-            guard case .interior(let mergedChildren, _, _) = merged, mergedChildren.count == 2
-            else {
-                preconditionFailure("concat: unexpected growth shape")
-            }
-            newChildren.insert(contentsOf: mergedChildren, at: 0)
+            let (replacement, split) = spliceOntoRightSpine(children[children.count - 1], other)
+            newChildren[newChildren.count - 1] = replacement
+            if let split { toAppend = [split] }
         }
-        return rewrap(newChildren)
+        let total = newChildren.count + toAppend.count
+        if total <= 2 * branchingFactor {  // mutation focus: 2B overflow test, interior branch
+            newChildren.append(contentsOf: toAppend)
+            return (.makeInterior(newChildren), nil)
+        }
+        var all = newChildren
+        all.append(contentsOf: toAppend)
+        let mid = all.count / 2
+        return (.makeInterior(Array(all[0..<mid])), .makeInterior(Array(all[mid...])))
     }
 }
 
-/// Wraps a freshly-spliced children list back into one node, splitting it in two (growing
-/// the tree by one level) if it overflowed `2B`.
-private func rewrap<Item: Summable>(_ children: [Node<Item>]) -> Node<Item> {
-    if children.count <= 2 * branchingFactor {
-        return .makeInterior(children)
-    }
-    let mid = children.count / 2
-    let left = Node.makeInterior(Array(children[0..<mid]))
-    let right = Node.makeInterior(Array(children[mid...]))
-    return .makeInterior([left, right])
+/// Joins two trees of any heights into one, preserving every invariant. A thin wrapper over
+/// `joinNodes` — `TreeBuilder`'s engine — so there is one rebalancing implementation, not
+/// two (see the file header). `rewrap`, `concatNodes`'s old sibling that spliced a modified
+/// children list back into one node, has no separate existence any more: its job is now
+/// `spliceOntoRightSpine`'s own `2B` overflow check, done inline instead of by a second
+/// function (see `rewrapOverflowBranchDeterministic` in `sumTreeTests.swift`, re-pointed at
+/// that check rather than at a function of this name).
+private func concatNodes<Item: Summable>(_ a: Node<Item>, _ b: Node<Item>) -> Node<Item> {
+    joinNodes(a, b)
 }
 
-/// Builds the list of sibling nodes produced by a split back into one tree, by folding
-/// `concat` across them left to right.
-private func buildFromNodes<Item: Summable>(_ nodes: [Node<Item>]) -> Node<Item> {
-    nodes.reduce(Node<Item>.makeLeaf([]), concatNodes)
-}
-
-/// Splits `node` at the first point where `predicate` becomes true of the running summary
-/// (`prefix` plus everything examined so far). `predicate` must be monotone: false for small
-/// accumulations, true from some point on. Returns `(everything before the flip point,
-/// everything from it on)`; the flip item itself lands in the **left** tree once its own
-/// summary has been folded in, matching a `>=`-style predicate written against a target
-/// offset (see `Rope.swift`'s use of this for exact-offset splits via single-item leaves).
-private func splitNode<Item: Summable>(
-    _ node: Node<Item>,
-    prefix: Item.Item_Summary,
-    predicate: (Item.Item_Summary) -> Bool
-) -> (Node<Item>, Node<Item>) {
-    // The split point can be at the very start of `node` (e.g. a predicate like `count >=
-    // 0`, which is already true of the empty prefix): check that before looking at any
-    // item or child, so the loops below only ever need to check the accumulation *after*
-    // adding each item/child, with the invariant that `predicate` is false on entry.
-    if predicate(prefix) {
-        return (.makeLeaf([]), node)
-    }
+/// `cut` in fragment form: one descent that, instead of rebuilding each side into a tree via
+/// `buildFromNodes` at every level (as `splitNode`/`cutNode` used to — see the file header),
+/// collects the per-level sibling groups on either side of the flip point as `Fragment`s for
+/// the caller to push into a `TreeBuilder`. Isolates the flip item itself and returns it
+/// (with the summary of everything strictly before it) — this is `cut`'s shape, not
+/// `split`'s: the flip item is never folded into either side here, unlike a `>=`-style
+/// predicate against a tree's own total summary applied by `splitNode`, which can never
+/// isolate "everything but the last item" this way (see `SumTree.split`'s doc comment for
+/// why `split` and `cut` need separate implementations at all).
+///
+/// **Fragment order is part of the contract.** `left` is emitted highest-level-first
+/// (root-ward groups before leaf-ward ones) and `right` is emitted deepest-first-then-upward
+/// (leaf-ward groups before root-ward ones) — a consequence of appending each level's
+/// leftover group before descending on the left and after returning from the descent on the
+/// right, not something either caller can recover from the types alone. Both must be pushed
+/// into a `TreeBuilder` in the order emitted. Mutation focus: this emission order, and the
+/// push order at each of `splitFragments`'s consumers (`SumTree.split`, `SumTree.cut`,
+/// `Rope.generalPathReplace`).
+///
+/// `predicate` must be monotone and false of `prefix`, exactly as `cutNode` used to require
+/// (same precondition, same reason — see `SumTree.cut`'s doc comment for why `predicate`
+/// already true of `.identity` is `split`'s case to special-case, not this function's).
+/// Returns `nil` when `predicate` never fires: `left` then receives a single `Fragment`
+/// wrapping the whole of `node`, and `right` receives nothing.
+package func splitFragments<Item: Summable>(
+    _ node: Node<Item>, prefix: Item.Item_Summary,
+    where predicate: (Item.Item_Summary) -> Bool,
+    left: inout [Fragment<Item>], right: inout [Fragment<Item>]
+) -> (item: Item, itemPrefix: Item.Item_Summary)? {
+    precondition(!predicate(prefix), "splitFragments: predicate must be false of prefix")
     switch node {
     case .leaf(let items, _):
         var cum = prefix
         for i in 0..<items.count {
             let next = cum + items[i].summary
             if predicate(next) {
-                let left = Array(items[0...i])
-                let right = Array(items[(i + 1)...])
-                return (.makeLeaf(left), .makeLeaf(right))
+                if i > 0 { left.append(.items(items[0..<i])) }
+                if i + 1 < items.count { right.append(.items(items[(i + 1)...])) }
+                return (items[i], cum)
             }
             cum = next
         }
-        return (node, .makeLeaf([]))
-    case .interior(let children, _, _):
-        var cum = prefix
-        for i in 0..<children.count {
-            let next = cum + children[i].summary
-            if predicate(next) {
-                let (childLeft, childRight) = splitNode(
-                    children[i], prefix: cum, predicate: predicate)
-                let leftNodes = Array(children[0..<i]) + [childLeft]
-                let rightNodes = [childRight] + Array(children[(i + 1)...])
-                return (buildFromNodes(leftNodes), buildFromNodes(rightNodes))
-            }
-            cum = next
-        }
-        return (node, .makeLeaf([]))
-    }
-}
-
-/// Extracts the single item at the first point where `predicate` becomes true of the
-/// running summary, returning the items strictly before it, the item itself (with its own
-/// prefix summary), and the items strictly after it. This is `splitNode`'s sibling, not a
-/// composition of two splits: `splitNode` folds the triggering item into its *left* result
-/// (so that a `>=`-style predicate against a tree's own total summary can never isolate
-/// "everything but the last item" — the trigger only ever fires once every item, including
-/// the last, has already been folded in). Extracting one item's neighbourhood needs its own
-/// single-pass walk, which is what this function is for. `predicate` must be monotone, and
-/// is assumed to be false of `prefix` itself (the caller already knows the target item is
-/// within this node's range); returns `nil` if it never triggers (malformed usage).
-private func cutNode<Item: Summable>(
-    _ node: Node<Item>,
-    prefix: Item.Item_Summary,
-    predicate: (Item.Item_Summary) -> Bool
-) -> (before: Node<Item>, item: Item, itemPrefix: Item.Item_Summary, after: Node<Item>)? {
-    // Enforced with a `preconditionFailure`, for symmetry with `splitNode`'s handling of the
-    // same assumption (`splitNode` has a valid answer when `predicate(prefix)` is already
-    // true — the empty-left-tree case — so it branches instead of trapping; `cutNode` does
-    // not, because there is no item left to isolate once the target has already been
-    // passed, so a caller that gets here has already broken the contract documented above).
-    // Honestly: no mutation of this line can be observed by a test today, because all three
-    // current callers of `cut` (`splitTree` and the two `concatMergingSeam` cuts —
-    // `Rope.locate` moved to the read-only `find` and no longer calls `cut` at all) satisfy
-    // the precondition; it exists for the same reason `splitNode`'s check exists — to fail
-    // loudly at the actual misuse site instead of returning a silently wrong item.
-    precondition(
-        !predicate(prefix),
-        "cutNode: predicate must be false of prefix")
-    switch node {
-    case .leaf(let items, _):
-        var cum = prefix
-        for i in 0..<items.count {
-            let next = cum + items[i].summary
-            if predicate(next) {
-                let before = Array(items[0..<i])
-                let after = Array(items[(i + 1)...])
-                return (.makeLeaf(before), items[i], cum, .makeLeaf(after))
-            }
-            cum = next
-        }
+        left.append(.items(items[...]))
         return nil
-    case .interior(let children, _, _):
+    case .interior(let children, _, let height):
         var cum = prefix
         for i in 0..<children.count {
             let next = cum + children[i].summary
             if predicate(next) {
-                guard
-                    let (childBefore, item, itemPrefix, childAfter) = cutNode(
-                        children[i], prefix: cum, predicate: predicate)
-                else {
-                    return nil
+                if i > 0 { left.append(.nodes(children[0..<i], height: height - 1)) }
+                let result = splitFragments(
+                    children[i], prefix: cum, where: predicate, left: &left, right: &right)
+                if i + 1 < children.count {
+                    right.append(.nodes(children[(i + 1)...], height: height - 1))
                 }
-                let beforeNodes = Array(children[0..<i]) + [childBefore]
-                let afterNodes = [childAfter] + Array(children[(i + 1)...])
-                return (buildFromNodes(beforeNodes), item, itemPrefix, buildFromNodes(afterNodes))
+                return result
             }
             cum = next
         }
+        left.append(.nodes(children[...], height: height - 1))
         return nil
     }
 }
 
 /// A read-only descent to the item at the first point where `predicate` becomes true of the
 /// running summary, returning the item and the summary accumulated immediately before it.
-/// Unlike `splitNode`/`cutNode`, this **allocates nothing, copies nothing and rebuilds
-/// nothing**: it does not call `buildFromNodes`, `makeLeaf` or `makeInterior`, so it is
-/// genuinely O(h) rather than the O(B · h²) a `cut`-then-discard-the-halves would cost (see
-/// `SumTree`'s file header for that measurement). `predicate` must be monotone; returns
-/// `nil` if it is never true of the tree's own total.
+/// Unlike `splitFragments`, this **allocates nothing, copies nothing and rebuilds
+/// nothing**: it does not call `makeLeaf` or `makeInterior`, so it is genuinely O(h) rather
+/// than the O(h) `splitFragments` plus a `TreeBuilder` pass would cost to get the same
+/// answer and then discard both halves (see `SumTree`'s file header). `predicate` must be
+/// monotone; returns `nil` if it is never true of the tree's own total.
 private func findNode<Item: Summable>(
     _ node: Node<Item>,
     prefix: Item.Item_Summary,
     predicate: (Item.Item_Summary) -> Bool
 ) -> (item: Item, itemPrefix: Item.Item_Summary)? {
-    // Symmetric with `cutNode`'s guard: without it, a predicate already true at `prefix`
-    // would silently fall through to the first item's leaf/interior loop below, which still
-    // triggers immediately (since `predicate` is monotone) and returns `(firstItem,
-    // itemPrefix: prefix)` — a plausible-looking but undefined answer, since the contract
-    // documented on `SumTree.find` assumes `predicate(prefix)` is false on entry. No current
-    // caller can reach this: `Rope.locate` only ever calls `find` with `0 < byteOffset <
-    // utf8Count` (guaranteed by `isScalarBoundary`'s early return for both endpoints), so
-    // `predicate(.identity)` (`$0.utf8 > byteOffset` at `utf8 == 0`) is always false; the
-    // `sumTreeTests.swift` callers are the same shape. It exists for the same reason
-    // `cutNode`'s check does — to fail loudly at the actual misuse site.
+    // Symmetric with `splitFragments`'s guard: without it, a predicate already true at
+    // `prefix` would silently fall through to the first item's leaf/interior loop below,
+    // which still triggers immediately (since `predicate` is monotone) and returns
+    // `(firstItem, itemPrefix: prefix)` — a plausible-looking but undefined answer, since the
+    // contract documented on `SumTree.find` assumes `predicate(prefix)` is false on entry. No
+    // current caller can reach this: `Rope.locate` only ever calls `find` with `0 <
+    // byteOffset < utf8Count` (guaranteed by `isScalarBoundary`'s early return for both
+    // endpoints), so `predicate(.identity)` (`$0.utf8 > byteOffset` at `utf8 == 0`) is always
+    // false; the `sumTreeTests.swift` callers are the same shape. It exists for the same
+    // reason `splitFragments`'s check does — to fail loudly at the actual misuse site.
     precondition(!predicate(prefix), "findNode: predicate must be false of prefix")
     switch node {
     case .leaf(let items, _):
@@ -578,27 +630,69 @@ package struct SumTree<Item: Summable>: Sendable {
     package var isEmpty: Bool { root.isEmptyLeaf }
 
     /// The monotone-predicate cursor. Splits at the first point where `predicate` becomes
-    /// true of the accumulated summary; see `splitNode`'s doc comment for the exact
-    /// semantics of which side the flip item lands on.
+    /// true of the accumulated summary; the flip item itself lands in the **left** result
+    /// once its own summary has been folded in, matching a `>=`-style predicate written
+    /// against a target offset (see `Rope.swift`'s use of this for exact-offset splits via
+    /// single-item leaves). Built on `splitFragments` plus two `TreeBuilder`s: one descent,
+    /// not one `buildFromNodes` fold per level (see the file header). `split` and `cut`
+    /// are not redundant with each other: `split` always folds the triggering item into its
+    /// left-hand result, so it can never isolate a tree's *last* item alone the way `cut`
+    /// can — see `splitFragments`'s doc comment.
+    ///
+    /// The `predicate(.identity)` case (already true of the empty tree) is `split`'s to
+    /// special-case, not `splitFragments`'s: `splitFragments` shares `cutNode`'s old
+    /// precondition that `predicate` is false of `prefix` on entry, because `cut` has no
+    /// well-defined answer for an already-triggered predicate (there is no item left to
+    /// isolate), whereas `split` does (the trivial `(empty, self)`).
     package func split(where predicate: (Item.Item_Summary) -> Bool) -> (SumTree, SumTree) {
-        let (left, right) = splitNode(root, prefix: .identity, predicate: predicate)
-        return (SumTree(root: left), SumTree(root: right))
+        if predicate(.identity) {
+            return (SumTree(), self)
+        }
+        var leftFragments: [Fragment<Item>] = []
+        var rightFragments: [Fragment<Item>] = []
+        guard
+            let (item, _) = splitFragments(
+                root, prefix: .identity, where: predicate,
+                left: &leftFragments, right: &rightFragments)
+        else {
+            // Never triggers: `splitFragments` already put the whole tree into
+            // `leftFragments` — mutation focus: this push order (and the two below).
+            var builder = TreeBuilder<Item>()
+            for fragment in leftFragments { builder.push(fragment) }
+            return (builder.finish(), SumTree())
+        }
+        var leftBuilder = TreeBuilder<Item>()
+        for fragment in leftFragments { leftBuilder.push(fragment) }
+        leftBuilder.push(.items(ArraySlice([item])))
+        var rightBuilder = TreeBuilder<Item>()
+        for fragment in rightFragments { rightBuilder.push(fragment) }
+        return (leftBuilder.finish(), rightBuilder.finish())
     }
 
     /// The cursor's other shape: extracts the one item at the first point where `predicate`
     /// becomes true, along with the items strictly before and strictly after it and the
     /// summary accumulated immediately before it. `nil` if `predicate` never triggers (an
-    /// empty tree, or a predicate that is never true of the tree's own total).
+    /// empty tree, or a predicate that is never true of the tree's own total) — including
+    /// `predicate(.identity)`, via `splitFragments`'s own precondition trap for that case
+    /// matching `cutNode`'s old one (see `split`'s doc comment for why `split` and `cut`
+    /// disagree about that case). Built on `splitFragments` plus two `TreeBuilder`s.
     package func cut(
         where predicate: (Item.Item_Summary) -> Bool
     ) -> (before: SumTree, item: Item, itemPrefix: Item.Item_Summary, after: SumTree)? {
+        var leftFragments: [Fragment<Item>] = []
+        var rightFragments: [Fragment<Item>] = []
         guard
-            let (before, item, itemPrefix, after) = cutNode(
-                root, prefix: .identity, predicate: predicate)
+            let (item, itemPrefix) = splitFragments(
+                root, prefix: .identity, where: predicate,
+                left: &leftFragments, right: &rightFragments)
         else {
             return nil
         }
-        return (SumTree(root: before), item, itemPrefix, SumTree(root: after))
+        var leftBuilder = TreeBuilder<Item>()
+        for fragment in leftFragments { leftBuilder.push(fragment) }
+        var rightBuilder = TreeBuilder<Item>()
+        for fragment in rightFragments { rightBuilder.push(fragment) }
+        return (leftBuilder.finish(), item, itemPrefix, rightBuilder.finish())
     }
 
     /// A read-only cursor: finds the item at the first point where `predicate` becomes true
@@ -712,15 +806,15 @@ extension SumTree {
     /// The path-copy edit (M1.1b stage 1): descends once to the leaf containing the flip
     /// item of `predicate`, replaces that leaf's items via `edit`, and rebuilds only the
     /// `h+1` nodes on the path back to the root — every off-path subtree is shared
-    /// verbatim, and neither `concatNodes` nor `buildFromNodes` is ever called (contrast
-    /// `splitNode`/`cutNode`; see the file header). Both overflow (the edited leaf grows
-    /// past `2B`) and underflow (it shrinks below `B`, and that shortfall may cascade up
-    /// through a chain of ancestors) are repaired in the same descent, not just overflow.
+    /// verbatim, and neither `joinNodes` nor `TreeBuilder` is ever invoked (contrast
+    /// `split`/`cut`; see the file header). Both overflow (the edited leaf grows past `2B`)
+    /// and underflow (it shrinks below `B`, and that shortfall may cascade up through a
+    /// chain of ancestors) are repaired in the same descent, not just overflow.
     ///
     /// `predicate` must be monotone, exactly as `find`/`cut` require, with
-    /// `!predicate(.identity)` — a precondition enforces this, matching `cutNode`'s own
-    /// convention for the same reason: a predicate already true of the empty prefix has no
-    /// well-defined flip item for a leaf-local editor to be handed. Returns `nil` if
+    /// `!predicate(.identity)` — a precondition enforces this, matching `splitFragments`'s
+    /// own convention for the same reason: a predicate already true of the empty prefix has
+    /// no well-defined flip item for a leaf-local editor to be handed. Returns `nil` if
     /// `predicate` never becomes true (including on an empty tree) or if `edit` declines.
     ///
     /// `edit` is handed the flip leaf's *whole* items array, the flip item's index within
@@ -755,7 +849,11 @@ extension SumTree {
     /// ever needs is collapsing away a now-pointless single-child level — the shape an
     /// interior root is left in after an underflow repair removed one of its two children
     /// entirely rather than merging or redistributing it.
-    private static func collapseRoot(_ node: Node<Item>) -> Node<Item> {
+    // `fileprivate`, not `private`: `TreeBuilder.finish()` (a separate type declared
+    // earlier in this same file) reuses this rather than duplicating it, per this round's
+    // design ("reuse it rather than writing a second one") — `private` would only be
+    // visible within this `extension SumTree` block itself.
+    fileprivate static func collapseRoot(_ node: Node<Item>) -> Node<Item> {
         var current = node
         while case .interior(let children, _, _) = current, children.count == 1 {
             current = children[0]

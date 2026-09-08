@@ -177,19 +177,25 @@ struct SumTreeTests {
         #expect(tree.find(where: { $0.count > 1000 }) == nil)
     }
 
-    // MARK: - Rebalancing: rewrap's overflow branch
+    // MARK: - Rebalancing: the interior overflow branch
 
     /// 3,000 rounds; each round joins two freshly-built, independently random-sized trees
     /// (1-4,000 items) by `concat` or by splitting one and splicing the other into the
     /// middle, then checks invariants and discards both. Every other test in this file
-    /// concatenates only equal-sized or single-item trees, which is why `rewrap`'s
-    /// `children.count > 2 * B` overflow branch (`SumTree.swift`'s `rewrap`) is never
-    /// reached: instrumented, it fires 0 times across the whole existing suite and 171 times
-    /// across a workload shaped like this one (measured, seed `0xC0FFEE`; see
-    /// `M1.1-perf-findings.md`). This test must fail if `rewrap`'s
-    /// `let mid = children.count / 2` is changed to `let mid = 1` — that mutation was
-    /// self-checked by hand (file backup, targeted edit, `touch`, rerun, restore; see the
-    /// implementer's report for what was observed).
+    /// concatenates only equal-sized or single-item trees, which is why the interior overflow
+    /// branch this test is named for is never reached by them: instrumented, it fires 0 times
+    /// across the whole existing suite and 171 times across a workload shaped like this one
+    /// (measured, seed `0xC0FFEE`; see `M1.1-perf-findings.md`).
+    ///
+    /// M1.1b stage 2 moved this branch: it used to be `rewrap`'s `let mid = children.count /
+    /// 2` (this test's original self-check target); `rewrap` no longer exists as a named
+    /// function — `concatNodes` is now a thin wrapper over `TreeBuilder`'s shared join engine
+    /// (see `SumTree.swift`'s file header), and the overflow split this test exercises is
+    /// `spliceOntoRightSpine`'s own `let mid = all.count / 2` in its interior branch (one of
+    /// the two `2B` overflow tests named in the implementer's report). Re-pointed rather than
+    /// deleted, per this round's own instruction not to drop a test because its target moved;
+    /// the self-check (file backup, targeted edit, `touch`, rerun, restore) was re-run against
+    /// the new location, not re-derived from scratch — see the implementer's report.
     @Test("randomised concat/insert of random-sized trees keeps invariants every round")
     func randomizedConcatAppend() throws {
         var rng = SplitMix64(seed: 0xC0FF_EE)
@@ -226,7 +232,7 @@ struct SumTreeTests {
         }
     }
 
-    /// Reaches `rewrap`'s overflow branch deterministically in one operation, instead of by
+    /// Reaches the interior overflow branch deterministically in one operation, instead of by
     /// the luck of a random seed — a seeded random test that happens to hit the branch is
     /// not a substitute, because if the op distribution shifts the coverage silently
     /// disappears again (that is exactly how this branch went uncovered in the first
@@ -235,9 +241,11 @@ struct SumTreeTests {
     /// "one item short of splitting": one more item pushes it over the leaf cap and splits
     /// it in two) — then concats a single-item tree onto it. That growth turns the last
     /// child's one node into two, taking the already-full interior node from `2B` to
-    /// `2B + 1` children and forcing `rewrap` to split it, growing the tree by one level.
-    @Test("deterministic: concat reaches rewrap's overflow branch in one operation")
-    func rewrapOverflowBranchDeterministic() throws {
+    /// `2B + 1` children and forcing a split, growing the tree by one level. Formerly named
+    /// for `rewrap`, the function that used to own this branch; see the `MARK` above for
+    /// where it lives now (`spliceOntoRightSpine`'s interior branch, as of M1.1b stage 2).
+    @Test("deterministic: concat reaches the interior overflow branch in one operation")
+    func interiorOverflowBranchDeterministic() throws {
         var value = 0
         var children: [Node<IntItem>] = []
         for _ in 0..<11 {
@@ -265,17 +273,205 @@ struct SumTreeTests {
         let result = SumTree.concat(bigTree, smallTree)
         try result.checkInvariants()
 
-        #expect(result.height == 2, "expected rewrap's split to grow the tree by one level")
+        #expect(result.height == 2, "expected the overflow split to grow the tree by one level")
         guard case .interior(let topChildren, _, _) = result.root else {
             Issue.record("expected an interior root after the overflow split")
             return
         }
         #expect(
-            topChildren.count == 2, "rewrap should have split the 13 overflowing children in two")
+            topChildren.count == 2,
+            "expected the 13 overflowing children to have been split in two")
 
         let expected = Array(0...value)
         #expect(result.items().map(\.value) == expected)
         #expect(result.summary.count == expected.count)
+    }
+
+    // MARK: - TreeBuilder / Fragment (M1.1b stage 2)
+
+    /// Mirrors `concatEveryHeightPair`, but through `TreeBuilder.push(subtree:)` rather than
+    /// `SumTree.concat` directly — the shape `concatNodes` itself now goes through.
+    @Test(
+        "TreeBuilder: pushing two well-formed subtrees preserves order and invariants, every height pair (0..3)"
+    )
+    func builderEveryHeightPair() throws {
+        let counts = [0, 1, 6, 12, 50, 144, 1000, 2000]
+        var trees: [SumTree<IntItem>] = []
+        var offset = 0
+        for n in counts {
+            trees.append(
+                SumTree<IntItem>(items: (offset..<(offset + n)).map { IntItem(value: $0) }))
+            offset += n
+        }
+        for a in trees {
+            for b in trees {
+                var builder = TreeBuilder<IntItem>()
+                builder.push(subtree: a.root)
+                builder.push(subtree: b.root)
+                let joined = builder.finish()
+                try joined.checkInvariants()
+                #expect(
+                    joined.items().map(\.value) == a.items().map(\.value) + b.items().map(\.value)
+                )
+            }
+        }
+    }
+
+    /// The property the whole design rests on: an underfull (but non-empty) `Fragment`
+    /// pushed alongside a well-formed subtree, in either push order, still produces a tree
+    /// that passes the unmodified invariant checker — because `TreeBuilder` dissolves the
+    /// loose group rather than ever wrapping it as a stored `Node` (see `Fragment`'s doc
+    /// comment). Covers every count `1...2B-1` (1...11) for both `Fragment` cases, and both
+    /// push orders (loose-then-tall, tall-then-loose) for each.
+    @Test(
+        "TreeBuilder accepts loose Fragment.items/.nodes of every count 1..<2B, in several push orders"
+    )
+    func builderAcceptsLooseFragments() throws {
+        var nextValue = 0
+        func drawItems(_ n: Int) -> [IntItem] {
+            defer { nextValue += n }
+            return (nextValue..<(nextValue + n)).map { IntItem(value: $0) }
+        }
+        // A well-formed height-0 leaf of exactly B (6) items, for `.nodes` groups — each
+        // individual node must be well-formed even though the group of them is not.
+        func drawLeaf() -> (Node<IntItem>, [Int]) {
+            let items = drawItems(6)
+            return (.leaf(items, IntSummary(count: items.count)), items.map(\.value))
+        }
+        func drawTallSubtree(_ n: Int) -> (Node<IntItem>, [Int]) {
+            let items = drawItems(n)
+            return (SumTree<IntItem>(items: items).root, items.map(\.value))
+        }
+
+        for count in 1...11 {  // 1...2B-1
+            let looseItems = drawItems(count)
+            let looseItemsValues = looseItems.map(\.value)
+            let looseItemsFragment = Fragment<IntItem>.items(looseItems[...])
+
+            var looseNodesValues: [Int] = []
+            var looseNodes: [Node<IntItem>] = []
+            for _ in 0..<count {
+                let (node, values) = drawLeaf()
+                looseNodes.append(node)
+                looseNodesValues.append(contentsOf: values)
+            }
+            let looseNodesFragment = Fragment<IntItem>.nodes(looseNodes[...], height: 0)
+
+            let (tall, tallValues) = drawTallSubtree(1000)
+
+            let scenarios: [(name: String, fragment: Fragment<IntItem>, looseValues: [Int])] = [
+                ("items", looseItemsFragment, looseItemsValues),
+                ("nodes", looseNodesFragment, looseNodesValues),
+            ]
+
+            for scenario in scenarios {
+                for looseFirst in [true, false] {
+                    var builder = TreeBuilder<IntItem>()
+                    if looseFirst {
+                        builder.push(scenario.fragment)
+                        builder.push(subtree: tall)
+                    } else {
+                        builder.push(subtree: tall)
+                        builder.push(scenario.fragment)
+                    }
+                    let result = builder.finish()
+                    let orderName = looseFirst ? "loose-then-tall" : "tall-then-loose"
+                    do {
+                        try result.checkInvariants()
+                    } catch {
+                        Issue.record(
+                            "count=\(count), \(scenario.name) \(orderName): invariant violation \(error)"
+                        )
+                    }
+                    let expected =
+                        looseFirst
+                        ? scenario.looseValues + tallValues : tallValues + scenario.looseValues
+                    #expect(
+                        result.items().map(\.value) == expected,
+                        "count=\(count), \(scenario.name) \(orderName): order mismatch")
+                }
+            }
+        }
+    }
+
+    @Test(
+        "TreeBuilder: finish() with nothing pushed, or only empty fragments, returns the empty tree"
+    )
+    func builderEmptyCases() throws {
+        let builder = TreeBuilder<IntItem>()
+        let empty = builder.finish()
+        try empty.checkInvariants()
+        #expect(empty.isEmpty)
+        #expect(empty.items().isEmpty)
+
+        let noItems: [IntItem] = []
+        let noNodes: [Node<IntItem>] = []
+        var builder2 = TreeBuilder<IntItem>()
+        builder2.push(.items(noItems[...]))
+        builder2.push(.nodes(noNodes[...], height: 0))
+        builder2.push(.items(noItems[...]))
+        let stillEmpty = builder2.finish()
+        try stillEmpty.checkInvariants()
+        #expect(stillEmpty.isEmpty)
+
+        // Empty fragments interleaved with real ones must be no-ops, not disruptions.
+        let real = (0..<6).map { IntItem(value: $0) }
+        var builder3 = TreeBuilder<IntItem>()
+        builder3.push(.nodes(noNodes[...], height: 0))
+        builder3.push(.items(real[...]))
+        builder3.push(.items(noItems[...]))
+        let result = builder3.finish()
+        try result.checkInvariants()
+        #expect(result.items().map(\.value) == Array(0..<6))
+    }
+
+    /// Mirrors `splitEveryOffsetAndRejoin`, but exercises `splitFragments` directly (`cut`'s
+    /// shape: the flip item is isolated on its own, not folded into either side — see
+    /// `splitFragments`'s doc comment) rather than through `SumTree.split`/`cut`, and rebuilds
+    /// both sides through a `TreeBuilder` rather than `concat`. The prototype did exactly
+    /// this over 3,926 split points; this is the same property at the same bar, against the
+    /// product implementation.
+    @Test(
+        "splitFragments at every offset, both sides rebuilt through a TreeBuilder, reproduces the original",
+        arguments: [0, 1, 5, 6, 7, 12, 13, 50, 144, 145, 1000, 3000]
+    )
+    func splitFragmentsEveryOffsetAndRejoin(_ n: Int) throws {
+        let tree = SumTree<IntItem>(items: Self.items(n))
+        for k in 0...n {
+            var leftFragments: [Fragment<IntItem>] = []
+            var rightFragments: [Fragment<IntItem>] = []
+            let predicate: (IntSummary) -> Bool = { $0.count > k }
+            let flip = splitFragments(
+                tree.root, prefix: .identity, where: predicate,
+                left: &leftFragments, right: &rightFragments)
+
+            var leftBuilder = TreeBuilder<IntItem>()
+            for fragment in leftFragments { leftBuilder.push(fragment) }
+            let left = leftBuilder.finish()
+            try left.checkInvariants()
+
+            var rightBuilder = TreeBuilder<IntItem>()
+            for fragment in rightFragments { rightBuilder.push(fragment) }
+            let right = rightBuilder.finish()
+            try right.checkInvariants()
+
+            if k < n {
+                guard let (item, itemPrefix) = flip else {
+                    Issue.record(
+                        "n=\(n), k=\(k): splitFragments returned nil but should have found item \(k)"
+                    )
+                    continue
+                }
+                #expect(item.value == k, "n=\(n), k=\(k)")
+                #expect(itemPrefix.count == k, "n=\(n), k=\(k)")
+                #expect(left.items().map(\.value) == Array(0..<k), "n=\(n), k=\(k)")
+                #expect(right.items().map(\.value) == Array((k + 1)..<n), "n=\(n), k=\(k)")
+            } else {
+                #expect(flip == nil, "n=\(n), k=\(k): expected splitFragments to find nothing")
+                #expect(left.items().map(\.value) == Array(0..<n), "n=\(n), k=\(k)")
+                #expect(right.items().isEmpty, "n=\(n), k=\(k)")
+            }
+        }
     }
 
     // MARK: - checkInvariants() has no negative test without these

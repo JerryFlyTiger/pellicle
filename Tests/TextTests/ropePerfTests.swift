@@ -262,4 +262,71 @@ struct RopePerfTests {
             print("releaseWithoutDeepRecursion: iteration \(iteration) completed")
         }
     }
+
+    /// The iteration side of the milestone (M1.1b stage 2 asks for this so the B re-sweep
+    /// can see traversal cost, not only edit cost): full traversal of a ~1 MB and a ~10 MB
+    /// rope via `chunks()` and via `bytes()`, several repetitions, reporting ns/chunk and
+    /// ns/byte. There is **no lazy cursor API in this project** — `SumTree.items()`,
+    /// `Rope.chunks()` and `Rope.bytes()` all flatten the whole tree into an array; nothing
+    /// here conforms to `Sequence` in a way that streams. Building a lazy cursor is M1.2's
+    /// job, not this one's — this test measures what exists today, so a future lazy
+    /// implementation has a documented "flatten into an array" baseline to beat.
+    ///
+    /// Prints only; asserts a loose absolute ceiling justified by what was actually measured
+    /// on this machine (`-O -wmo`, `swift build -c release`, one process — see this file's
+    /// header), not an invented number: an invented bound is worse than none (CLAUDE.md).
+    /// Pilot run on this machine (`PELLICLE_PERF=1 swift test -c release --filter
+    /// RopePerfTests/iterationCost`): `chunks()` cost ~5.5-5.8 ns/chunk and `bytes()` cost
+    /// ~0.17 ns/byte at both 1 MB and 10 MB. The ceilings below are roughly 10x those
+    /// numbers, not the numbers themselves — this asserts "the fast path did not regress or
+    /// stop being taken", not "iteration is fast on this exact machine".
+    @Test("iteration cost: full traversal via chunks() and bytes(), ~1 MB and ~10 MB")
+    func iterationCost() {
+        let sizes = [1_000_000, 10_000_000]
+        let repetitions = 20
+        for n in sizes {
+            let rope = Rope(String(repeating: "a", count: n))
+
+            var chunksTotal: TimeInterval = 0
+            var chunkCount = 0
+            for _ in 0..<repetitions {
+                let start = Date()
+                var count = 0
+                for chunk in rope.chunks() {
+                    count += 1
+                    _ = chunk.count  // touch each chunk, not just the sequence
+                }
+                chunksTotal += Date().timeIntervalSince(start)
+                chunkCount = count
+            }
+            let nsPerChunkIteration =
+                (chunksTotal / Double(repetitions)) * 1_000_000_000 / Double(chunkCount)
+            print(
+                "iterationCost: n=\(n) chunks() \(chunkCount) chunks, "
+                    + "\(nsPerChunkIteration) ns/chunk")
+            let chunkMessage =
+                "chunks() traversal of a \(n)-byte rope cost \(nsPerChunkIteration) ns/chunk, "
+                + "over the 60 ns/chunk ceiling (release build)"
+            #expect(nsPerChunkIteration < 60, "\(chunkMessage)")
+
+            var bytesTotal: TimeInterval = 0
+            for _ in 0..<repetitions {
+                let start = Date()
+                var count = 0
+                for byte in rope.bytes() {
+                    count += Int(byte) & 0  // touch each byte without affecting the count
+                    count += 1
+                }
+                bytesTotal += Date().timeIntervalSince(start)
+                #expect(count == n)
+            }
+            let nsPerByteIteration =
+                (bytesTotal / Double(repetitions)) * 1_000_000_000 / Double(n)
+            print("iterationCost: n=\(n) bytes() \(n) bytes, \(nsPerByteIteration) ns/byte")
+            let byteMessage =
+                "bytes() traversal of a \(n)-byte rope cost \(nsPerByteIteration) ns/byte, "
+                + "over the 2 ns/byte ceiling (release build)"
+            #expect(nsPerByteIteration < 2, "\(byteMessage)")
+        }
+    }
 }

@@ -155,13 +155,12 @@ struct RopeTests {
     /// The fixture is built via `Rope(unmergedChunks:)`, not through any edit path, and its
     /// two chunks (10 and 20 bytes) sum to 30, comfortably `<= 64`. Draw no general conclusion
     /// from that: adjacent pairs summing `<= 64` do survive in an ordinary rope (the Part D
-    /// scan below counts 15 in the large band), and two successive attempts to state *which*
+    /// scan below counts 19 in the large band), and two successive attempts to state *which*
     /// shapes an edit path cannot produce were both refuted by cold reads — see
     /// `Rope.init(unmergedChunks:)`'s comment for what they were and why this one now claims
-    /// nothing general. What matters here is only what was measured. This is a root leaf (`height ==
-    /// 0`), so `tryLeafLocalReplace`'s coalesce guard (`isWholeLeaf || newItems.count >
-    /// branchingFactor`) is bypassed and would merge these two chunks if a walk-and-repack
-    /// ran at all — which is exactly what makes this fixture able to tell "the no-op
+    /// nothing general. What matters here is only what was measured. `tryLeafLocalReplace` would
+    /// merge these two chunks if a walk-and-repack ran at all — which is exactly what makes
+    /// this fixture able to tell "the no-op
     /// short-circuit correctly skipped the walk" apart from "it walked and repacked but
     /// happened not to trigger a merge" (an earlier 30/40-byte version of this fixture, sum
     /// 70 > 64, could not tell those apart: deleting the short-circuit entirely still left
@@ -183,7 +182,7 @@ struct RopeTests {
             "fixture did not build two separate un-merged chunks: \(beforeChunkCounts)")
         #expect(
             beforeHeight == 0,
-            "fixture must be a single leaf (the whole tree) so the coalesce guard is bypassed")
+            "fixture must be a single leaf (the whole tree)")
 
         rope.append(Rope())
         #expect(rope.toString() == beforeContent)
@@ -384,9 +383,13 @@ struct RopeTests {
 
     /// Part D of M1.1b stage 1's implementer report: PLAN.md wants a `Rope`-level
     /// assertion that no two adjacent chunks have byte counts summing to `<= 64` — but a
-    /// leaf-local coalesce guarded by `items.count > B` (see `Rope.tryLeafLocalReplace`)
-    /// cannot guarantee that across a leaf boundary, or whenever the guard blocks a
-    /// coalesce to protect the fill bound. This is deliberately a **measurement, not an
+    /// coalesce that is leaf-local (see `Rope.tryLeafLocalReplace`) cannot guarantee that
+    /// across a leaf boundary. M1.1b stage 2 removed the `items.count > B` guard this
+    /// comment used to name as a second cause, and two other causes remain: `SumTree`'s
+    /// `combineUnderflowedSiblings` joins two leaves' items with no awareness of the `<= 64`
+    /// policy, and the coalesce does not iterate to a fixpoint, so a merge product is never
+    /// re-examined against the neighbour beyond the one it just absorbed. This is
+    /// deliberately a **measurement, not an
     /// assertion**: it counts adjacent-chunk-pair violations and returns the count for the
     /// implementer's report to print, not for a test to fail on. Do not turn this into an
     /// `#expect` and do not tune a threshold against it — see the M1.1b stage 1 spec, Part
@@ -939,8 +942,9 @@ struct RopeTests {
     /// `newChunks.isEmpty` early return used to skip coalescing for entirely.
     ///
     /// The three chunks (30, 40, 30 bytes) are built via three separate general-path
-    /// appends, each seam sized so `concatMergingSeam` declines to merge it (every pairwise
-    /// sum among adjacent originals is 70 > 64) — the only way to get three genuinely
+    /// appends, each seam sized so `generalPathReplace`'s seam-merge policy declines to
+    /// merge it (every pairwise sum among adjacent originals is 70 > 64) — the only way to
+    /// get three genuinely
     /// separate, un-coalesced chunks sitting in one leaf, since any single edit whose total
     /// span is <= 64 bytes gets repacked into one chunk by `packChunks`. Removing the middle
     /// (40-byte) chunk's exact byte span leaves the two 30-byte chunks adjacent, and
@@ -969,6 +973,107 @@ struct RopeTests {
             finalChunkCounts == [60],
             "expected the two 30-byte neighbours to coalesce into one 60-byte chunk, got \(finalChunkCounts)"
         )
+    }
+
+    /// The positive case complementing `leafLocalDeleteOfWholeChunkCoalesces` above (that one
+    /// is the negative: a pair summing 70 > 64 must not merge). A general-path append whose
+    /// boundary chunk pair sums to `<= 64` must still merge — reachable only through
+    /// `replaceSubrangeGeneralPathOnly`, since the fast path would otherwise absorb an edit
+    /// this small and never reach `generalPathReplace`'s seam-merge policy at all. Both
+    /// original chunks are the whole tree (a single leaf, `height == 0`), so the boundary
+    /// chunk on each side is a plain array element of a `Fragment.items` group, not one
+    /// buried inside a `Fragment.nodes` subtree — the case `generalPathReplace`'s doc comment
+    /// says the merge is declined for.
+    @Test("general path: an appended chunk pair summing <= 64 at the seam still merges")
+    func generalPathMergesSeamUnderThreshold() {
+        var rope = Rope(String(repeating: "a", count: 20))
+        #expect(rope.height == 0, "fixture must be a single leaf")
+        rope.replaceSubrangeGeneralPathOnly(
+            rope.utf8Count..<rope.utf8Count, with: Rope(String(repeating: "b", count: 20)))
+        #expect(
+            rope.toString()
+                == String(repeating: "a", count: 20) + String(repeating: "b", count: 20))
+        let chunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            chunkCounts == [40],
+            "expected the two 20-byte chunks to merge into one, got \(chunkCounts)")
+    }
+
+    /// The `mergeLeadingSeam` counterpart to `generalPathMergesSeamUnderThreshold` above (that
+    /// one only exercises `mergeTrailingSeam`, since its insert lands at the very end where
+    /// `suffixFragments` is empty and `mergeLeadingSeam` has nothing to decline *into* — it
+    /// declines correctly, but that is not the same as a test asserting it can also *succeed*).
+    /// This drives an insert into the middle of a single leaf's first chunk, via
+    /// `replaceSubrangeGeneralPathOnly` so the stage-1 fast path cannot absorb it: the
+    /// straddling chunk's right remainder (5 bytes) plus the untouched chunk that follows it
+    /// (30 bytes) sums to 35 <= 64, so `mergeLeadingSeam` must merge them.
+    @Test("general path: an inserted run's trailing edge merges with the following chunk")
+    func generalPathMergesLeadingSeamUnderThreshold() {
+        var rope = Rope(String(repeating: "a", count: 40))
+        rope.replaceSubrangeGeneralPathOnly(
+            rope.utf8Count..<rope.utf8Count, with: Rope(String(repeating: "c", count: 30)))
+        #expect(rope.height == 0, "fixture must be a single leaf")
+        let originalChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            originalChunkCounts == [40, 30],
+            "fixture did not build two separate un-merged chunks: \(originalChunkCounts)")
+
+        rope.replaceSubrangeGeneralPathOnly(35..<35, with: Rope(String(repeating: "b", count: 3)))
+        #expect(
+            rope.toString()
+                == String(repeating: "a", count: 35) + String(repeating: "b", count: 3)
+                + String(repeating: "a", count: 5) + String(repeating: "c", count: 30))
+
+        let finalChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            finalChunkCounts == [35, 3, 35],
+            "expected the 5-byte remainder and the 30-byte following chunk to merge into one 35-byte chunk, got \(finalChunkCounts)"
+        )
+    }
+
+    /// The seam policy's **boundary**: a pair summing to exactly 64 merges, because the
+    /// threshold is `<= 64`. The two tests above both use pairs well under the threshold (40
+    /// and 35), so mutating either `mergeTrailingSeam`'s or `mergeLeadingSeam`'s comparison
+    /// from `<= 64` to `< 64` left the whole suite green -- a mutation pass by the main
+    /// conversation found both survivors. These two tests are what kill them, and they are
+    /// the only tests that pin the exact value of the threshold rather than merely that one
+    /// exists.
+    @Test("general path: a seam pair summing to exactly 64 merges, trailing side")
+    func generalPathMergesTrailingSeamAtExactlySixtyFour() {
+        var rope = Rope(String(repeating: "a", count: 34))
+        #expect(rope.height == 0, "fixture must be a single leaf")
+        rope.replaceSubrangeGeneralPathOnly(
+            rope.utf8Count..<rope.utf8Count, with: Rope(String(repeating: "b", count: 30)))
+        #expect(
+            rope.toString()
+                == String(repeating: "a", count: 34) + String(repeating: "b", count: 30))
+        let chunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            chunkCounts == [64],
+            "34 + 30 == 64 is exactly the threshold and must merge, got \(chunkCounts)")
+    }
+
+    @Test("general path: a seam pair summing to exactly 64 merges, leading side")
+    func generalPathMergesLeadingSeamAtExactlySixtyFour() {
+        var rope = Rope(String(repeating: "a", count: 40))
+        #expect(rope.height == 0, "fixture must be a single leaf")
+        rope.replaceSubrangeGeneralPathOnly(
+            rope.utf8Count..<rope.utf8Count, with: Rope(String(repeating: "c", count: 30)))
+        let originalChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            originalChunkCounts == [40, 30],
+            "fixture did not build two separate un-merged chunks: \(originalChunkCounts)")
+
+        // Splitting at 6 leaves a 34-byte remainder; 34 + 30 == 64 is exactly the threshold.
+        rope.replaceSubrangeGeneralPathOnly(6..<6, with: Rope(String(repeating: "z", count: 3)))
+        #expect(
+            rope.toString()
+                == String(repeating: "a", count: 6) + String(repeating: "z", count: 3)
+                + String(repeating: "a", count: 34) + String(repeating: "c", count: 30))
+        let finalChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            finalChunkCounts == [6, 3, 64],
+            "34 + 30 == 64 is exactly the threshold and must merge, got \(finalChunkCounts)")
     }
 
     // MARK: - Fragmentation guard
