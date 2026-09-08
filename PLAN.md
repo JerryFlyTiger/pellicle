@@ -2,12 +2,58 @@
 
 An Emacs-style editor for macOS, written in Swift on Apple's frameworks, with a built-in
 Emacs Lisp engine, designed from the ground up to remove GNU Emacs's structural pain
-points. It is the successor to Reticle (`~/My_Projects/reticle`, Rust, 110 milestones):
+points. It is the successor to Reticle (`~/My_Projects/reticle`, Rust, **124 milestones
+completed as of 2026-09-08**):
 Reticle proved the Verilog feature set and the process; pellicle replaces the parts of
 Reticle that its own README lists as limitations (fixed character-grid GUI, synchronous
 remote I/O, non-rebindable minibuffer, `Rc` cycle leaks, no runtime grammars, no headless
 rendering) and adds the things the owner asked for that Reticle could not host (a native
 macOS shell, a real terminal, GPU rendering, a plugin ecosystem).
+
+*Corrected 2026-09-09:* the line above said "110 milestones" from this file's first commit
+until today. **That number appears nowhere in Reticle's own files.** Reticle's `README.md:420`
+claims 86 "as of 2026-09-01"; its `PLAN.md:3104` has since reached `## M124 --- SystemVerilog
+interfaces, non-ANSI port lists, and class prototypes (completed 2026-09-08)`, so the README is
+a stale snapshot its own plan has outrun by 38 milestones. Read Reticle's `PLAN.md`, not its
+README, for that project's state. The two projects measured on the same day, 2026-09-09:
+
+Both columns are measured **at a commit**, not in a working tree: Reticle at `da7f131`
+("PLAN.md: M125 record" is `2c6d32e`; `da7f131` is M124, 2026-09-08), pellicle at `1010f56`.
+The reason is in the provenance note below.
+
+| | Reticle @ `da7f131` | pellicle @ `1010f56` |
+|---|---|---|
+| first -> last commit | 2026-07-20 -> 2026-09-08 (50 days) | 2026-09-05 -> 2026-09-08 (3 days) |
+| commits | 322 | 26 |
+| source | 112,384 lines of Rust, 146 files, 7 crates | 5,662 lines of Swift, 38 files, 12 modules (7 still placeholders) |
+| tests | 2,327 `#[test]`, 88 test binaries, 47 `#[ignore]` | 97 `@Test`, 13 suites |
+| milestones | M124 done; only M87 stages 4-5 outstanding | M0, M1.1, M1.1b of 33 families |
+
+The milestone counts are **not comparable**: section 8's "Milestone granularity" note records
+that Reticle's milestones were the size of one command (`kill-whole-line` was its M110, which
+is probably where "110" came from), while a Phase A entry here is a family of sub-milestones.
+Reticle's 124 is roughly this plan's *sub*-milestone grain. Lines per day are the same order
+(2,248 against 1,887); the 20x gap in size is 50 days against 3.
+
+*Provenance of that table, and the rule it produced.* Reticle is **not a static object to
+measure**: it is under active development by the same owner, and it committed M125 on
+2026-09-09 while this paragraph was being written. Three passes measured it that day and got
+three different answers for the same two figures -- 112,384 lines / 2,327 `#[test]` (a survey
+agent), 113,188 / 2,359 (the main conversation), 113,212 / 2,364 (a cold read) -- and the
+middle two were **working-tree states that never existed as a commit**, caught mid-M125. The
+main conversation used its own number to "correct" the survey's, and the correction was the
+error: pinned to `da7f131`, the survey's figures reproduce exactly, and the same commands at
+`2c6d32e` (M125) give 113,513 / 2,366. Only the crate count was genuinely wrong and stays
+corrected at **7**: Reticle's root `Cargo.toml` carries its own `[package]` beside the six
+`[workspace] members`.
+
+**The rule: a number about another repository is quoted with the commit it was measured at, or
+it is not quoted.** `CLAUDE.md`'s measurement protocol already says one process and absolute
+bounds for benchmarks; this is the same discipline for counting, and it costs nothing --
+`git ls-tree -r --name-only <sha>` piped through `git show` is as cheap as `wc -l` on the
+working tree. "Re-run a second-hand number before believing it" is necessary but was not
+sufficient here, because the re-run was itself unpinned. What did hold: 88 test binaries, 47
+`#[ignore]`, 322 commits, 146 files and both cited anchors reproduced at every pass.
 
 **Positioning (owner, 2026-09-05):** pellicle is the macOS, Swift rewrite of Reticle and
 of Emacs, but it must not be Reticle with a new coat: where Reticle is a Verilog editor,
@@ -16,6 +62,26 @@ Verilog/SystemVerilog stays the first language and the proving ground, the other
 languages are first-class rather than afterthoughts, and org-mode is built to GNU org's full
 feature level (agenda, capture, refile, clocking, babel, export, backlinks), not as a thin
 outliner. Speed of delivery matters more than method: any technique that works is welcome.
+
+*Amended 2026-09-09 (owner).* Two readings of that last sentence were tested against the owner
+and one was wrong. "Method" means the **choice of technique** -- which library, whose design,
+which route -- and it is unconstrained. It does **not** mean the working method in `CLAUDE.md`:
+the owner values quality, and the review discipline (cold reads with no round cap, until the
+trailing diff is empty) is not negotiable and is not to be traded for delivery speed.
+
+Three further constraints from the same conversation:
+
+- **Reticle is the benchmark, not just the predecessor: pellicle competes with it.** Its
+  feature set and design decisions are there to be studied and beaten.
+- **No code is copied, from Reticle or from anywhere.** Designs, feature lists and recorded
+  measurements are legitimate references; source is not. Every line here is written fresh.
+  (This already held for GNU's Elisp for a licence reason -- see "Licensing of the shipped
+  Elisp" in section 5 -- and now holds for Reticle, which the owner owns, for a project
+  reason.)
+- **Zed, VS Code and JetBrains are equally legitimate references**, subject to one limit:
+  pellicle stays an **Emacs-like editor** and does not drift into being one of them. The
+  extension architecture in 4.9 is the place this matters most, because that is where GNU
+  Emacs is the anti-pattern rather than the model (R4, R9).
 
 This file is the design record. The working rules live in `CLAUDE.md`, which is loaded in
 every session; this file is not. Look up the section you need rather than reading it whole.
@@ -36,24 +102,49 @@ The owner's wish list, restated as requirements (priority order is the owner's):
 | R1 | Killer coding features, **Verilog / SystemVerilog first**; Swift, Python, Perl, Tcl/Tk, C/C++ supported but second | 1 |
 | R2 | **org-mode, complete**: file-format compatible and at GNU org's feature level, including its full GTD workflow (agenda, capture, refile, archive, clocking) | 2 |
 | R3 | Extreme visual beauty, extreme performance, low power, long-session stability (never slower, hotter or crashier over time) | 3 |
-| R4 | Plugin ecosystem like GNU Emacs in breadth, modelled on how VS Code / JetBrains isolate extensions so they cannot hurt performance | hard constraint |
+| R4 | Plugin ecosystem like GNU Emacs in breadth, modelled on how **Zed**, VS Code and JetBrains isolate extensions so they cannot hurt performance. GNU Emacs's extension interaction is the anti-pattern: it is what makes a configured Emacs slow (owner, restated 2026-09-09) | hard constraint |
 | R5 | Every expert technique for speed and energy: GPU rendering, JIT-class engine design | hard constraint |
 | R6 | **No CLI/TUI.** The app is itself an iTerm2-class terminal, and also runs shell commands the Emacs way (`M-!`, `shell-command`, `compile`) | hard constraint |
 | R7 | The killer features of world-class Emacs setups (Doom, Purcell, Prot, Karthink) | 1-3 by feature |
 | R8 | Written in Swift, macOS only, leaning on Apple frameworks; study VS Code, JetBrains, Zed, Doom, Purcell and Reticle | hard constraint |
+| R9 | The Elisp engine is **multi-process and multi-threaded**, so that the editor stays fast and no extension can drag it down (owner, stated 2026-09-05, recorded here 2026-09-09) | hard constraint |
+| R10 | **GNU Emacs's own key bindings are the default**; the evil layer (W1) is opt-in, because not every user wants it. Promoted out of the wish list by the owner on 2026-09-09: it constrains how existing milestones are built rather than adding new ones, so it belongs here where it can be audited, not in 8b where it might be remembered only after the bindings were built some other way | hard constraint |
 
-Two consequences the owner should read before anything else:
+Three consequences the owner should read before anything else:
 
 1. **GNU Emacs packages are a porting target, not a runtime target.** Every one of the five
    root causes of Emacs's pain (section 3) is fixable only if the Elisp contract is defined
-   narrowly. Reticle took the same stance and it held for 110 milestones. pellicle runs
+   narrowly. Reticle took the same stance and it held for 124 milestones. pellicle runs
    *its own* Elisp dialect: lexical by default, one dedicated interpreter thread, async
    primitives, rich key events. The **config idioms** of Doom/Purcell-style setups run
    (`use-package` forms, hooks, keymaps, `setq`/`setopt`, custom variables, mode hooks); a
    literal Doom config does not, because it drives a package manager and hundreds of
    third-party symbols. `magit.el` does not run, and does not need to, because git is
    native.
-2. **The first visible Verilog feature is far away.** A Verilog editor needs a buffer, a
+2. **R9 is met by isolation, not by a parallel Lisp heap, and the owner should know that.**
+   Read R9's two halves separately, because the plan answers them differently. **The
+   *interpreter* becomes multi-process only at M29**, which ports Reticle's proven worker-
+   process design for parallel user Elisp; that is the one place Lisp code runs in more than
+   one process. 4.9's tier 3a (LSP/DAP/JSON-RPC children, XPC helpers) and tier 3b
+   (ExtensionKit `.appex`) are process isolation for *extensions*, and the code in those
+   processes is mostly not Elisp -- they answer R4's "no extension can hurt performance", not
+   "the Elisp engine is multi-process", and a cold read was right that running the two
+   together reads like a bait-and-switch. Multi-*thread* is delivered everywhere except
+   inside the interpreter: 4.3 puts the UI on the main thread, Elisp on its own dedicated
+   pthread, and tree-sitter parsing, LSP transport, the project index, search, git and the
+   file watcher on background actors, so "layout and paint never wait for Elisp" is literally
+   true and M6's definition of done tests it. **Elisp bytecode itself runs on one thread**;
+   `make-thread` is cooperative, as in GNU (section 5). 4.16 records "one Elisp thread" as a
+   deliberate rejection of an actor per buffer, because `set-buffer` and
+   `(with-current-buffer ...)` semantics assume a single current buffer and every config
+   relies on it. What actually keeps extensions from hurting the editor is the mechanism in
+   4.3 and 4.9: a deadline check every 64 VM instructions, `hook-time-budget` with three-
+   strikes quarantine and echo-area attribution, out-of-band `C-g`, tier-2 Wasm under memory
+   limits and fuel/epoch interruption, and tier-3 process boundaries. If the owner means
+   Lisp bytecode literally executing on several threads at once, that reopens 4.16's row and
+   rewrites M2's heap, M3's VM and M5's command loop; the cost is lowest now, before M2
+   starts.
+3. **The first visible Verilog feature is far away.** A Verilog editor needs a buffer, a
    renderer, a command loop, an Elisp engine and an LSP client before `AUTOINST` can exist.
    The milestone plan (section 8) is ordered so that the foundation stages are each usable
    and testable on real RTL, and Verilog features start at the earliest point where they can
@@ -1131,6 +1222,33 @@ numbers are recorded as the baseline.
   demo corpus in each language.
 - **M31 Distribution.** Sparkle updates, notarization pipeline, documentation, the demo
   corpus (Reticle's `demo/` conventions: every claim run, one directory per role).
+
+---
+
+## 8b. Owner's wish list (recorded 2026-09-09; **not planned, not scheduled**)
+
+Recorded verbatim at the owner's instruction so it is not lost, and explicitly *not* worked
+into section 8's milestone order. A future session with capacity picks one up and plans it
+then -- **except W9, which did not wait**: the owner promoted it to R10 on the day this list
+was recorded, because it constrains milestones that are already planned rather than adding new
+ones. Its row is kept below, pointing at R10, so that the list stays a complete record of what
+was asked for. Nothing here has a milestone, a definition of done or an estimate, **W9
+included**: R10 is a requirement, and section 1's requirements do not carry those either.
+The right-hand column is the audit of what section 8 already covers, done when the list was
+recorded, so that a later session does not plan something twice.
+
+| # | Wish | Already in this plan? |
+|---|---|---|
+| W1 | Evil mode **+ `evil-collection`** | **Partly.** M20 has "the evil layer ported from Reticle's `evil.el` design"; section 5 lists `evil` among the packages tier 2 must be able to host. **`evil-collection` is new** -- nothing covers per-package vim bindings for dired, the git status buffer, `occur` and the rest |
+| W2 | Magit | **Yes, in shape -- and the owner confirmed that is what was meant (2026-09-09).** 4.12 and M19 build git natively, "driving the `git` CLI as Magit and VS Code do", with a status buffer whose sections and `s`/`u`/`c`/`P` keys are Magit's, and M19's definition of done is "a scripted repository walkthrough matches Magit's observable results". Section 1 records that `magit.el` itself does not run, and that decision stands: asked directly whether he wanted the Magit *workflow* or literally to run `magit.el`, the owner chose the workflow. Consequence to remember: third-party magit extensions (forge and the like) are ports, not installs |
+| W3 | SSH remote editing (building it is required; verifying against a live host may be deferred, as in Reticle) | **Yes.** M26, on VS Code Remote's model, async by construction, with Reticle's M75-M77 save-safety rules. Section 9 excludes TRAMP methods *beyond* SSH, not SSH |
+| W4 | A text search system, referencing Reticle's | **Yes.** 4.12 "Search" and M11: ripgrep into an editable results buffer, wgrep-style write-through, orderless filtering, with Reticle's two recorded defects in that area fixed rather than ported |
+| W5 | Language support and highlighting for Verilog, SystemVerilog, C/C++, Python, Tcl/Tk, Perl, Swift, Emacs Lisp, **Scheme**, **Java**, **Rust** | **Partly.** 4.1's grammar list is SystemVerilog, Swift, Python, Perl, Tcl, C, C++, Elisp, Org, Bash, Markdown, JSON/YAML/TOML; M9 does SystemVerilog properly and M30 is the breadth wave. **Scheme, Java and Rust are new** and are not in that list |
+| W6 | Eshell and IELM, as GNU has them | **No -- both are new.** The plan has `comint`, `shell-command`, `compile` and `M-!`/`M-&`/`M-|` (M13) and a real terminal, but neither Eshell nor IELM appears anywhere in it. Reticle has both |
+| W7 | Buffers as GNU has them, switchable | **The model yes, the UI unstated.** M5 builds the buffer model, and section 5's compatibility contract implies `switch-to-buffer`; but no milestone itemises the buffer-list surface (`switch-to-buffer` completion, `ibuffer`, buffer-menu). M8b's list is the editing commands and M11's is project navigation; neither names it. A cold read caught this row claiming a flat "Yes" |
+| W8 | Horizontal and vertical window splitting | **Yes.** M5's windows-and-frames model, whose definition of done is that window and `display-buffer` behaviour match oracle transcripts of GNU 30.2 |
+| W9 | GNU Emacs's own key bindings as the default, because not everyone uses evil | **Promoted out of this list: it is now R10 in section 1.** It was implicit everywhere and stated nowhere -- the whole plan assumes Emacs chords (4.7, M8b's command library, M6's IME rule) -- but unlike the rest of this list it is not future work, it is a condition on milestones that are already planned. The owner moved it to the requirements table on 2026-09-09 |
+| W10 | User-configurable fonts, referencing Reticle | **Yes, in half.** M7 names the bundled faces (JetBrains Mono default, Fira Code, SF Mono, bundled per Reticle M105); that the **user chooses** among them, and can pick their own, is implied by M7's SwiftUI settings panel and never stated |
 
 ---
 
@@ -2630,7 +2748,10 @@ observations and not a rule.
 whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
 - **State**: M0, M1.1 and **both stages of M1.1b** are done, each with a record in section 11.
-  The gate is green (`Test run with 96 tests in 13 suites passed`). The working tree is clean.
+  The gate is green (`Test run with **97** tests in 13 suites passed`, re-run 2026-09-09).
+  This line said 96 until 2026-09-09: the stage 2 record's "87 tests -> 96" was true when it
+  was written, and the *next* commit, `1010f56`, added `generalPathInsertCost` without coming
+  back to update the handover. The working tree is clean.
   A single-scalar insert into 1 MB costs **2.6 us** on the fast path and **12.8 us** through the
   general path, the latter down from 96.8 us. `B` was re-swept on the new implementation and
   **kept at 6**; the table and the reasoning are in the stage 2 record, so do not redo it --

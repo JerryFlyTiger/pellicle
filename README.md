@@ -23,14 +23,17 @@ long-session stability are constraints on every milestone rather than phases of 
 
 ## Status
 
-**M0 of 33.** There is no editor yet. What exists today is the floor everything else is
-built on, and it is finished and verified:
+**M0 of 33 done; M1 under way.** There is no editor yet — nothing here opens a file or draws
+a character. What exists is the floor everything else is built on, plus the text model that
+sits on it, and both are finished and verified.
+
+**M0, the repository and the gate** (2026-09-06):
 
 - a SwiftPM package with the module layout the design calls for — twelve Swift modules,
   `Platform`, `Text`, `Lisp`, `Editor`, `Canvas`, `Terminal`, `Lang`, `Org`, `Git`,
   `Extensions`, `Chrome` and `App`, over a small C shim in `CPlatform`. `Platform` and
   `App` carry the infrastructure below, about 440 lines between them once blanks and
-  comments are set aside (684 by `wc -l`); `Text`, `Lisp` and
+  comments are set aside (684 by `wc -l`); `Lisp` and
   `Editor` carry a placeholder plus the probes `dev/check-inlining.sh` measures; the other
   seven are placeholders of three code lines each, waiting for their milestone;
 - `dev/gate.sh`, the definition of done: format lint, a debug build, a release build, and
@@ -46,7 +49,20 @@ built on, and it is finished and verified:
   members are promoted deliberately in the source instead);
 - the app icon: an Icon Composer package whose layer artwork `dev/gen-icon.py` generates.
 
-Running it opens an empty native window. Next up is M1, the rope.
+**M1.1 and M1.1b, the rope** (2026-09-08) — `Text` is now 1,995 lines:
+
+- a persistent B+-tree rope over UTF-8 chunks, with per-node summaries, O(1) `Sendable`
+  snapshots and a structural invariant check, property-tested against a naive `[UInt8]` model
+  over randomised operation sequences. `B = 6` is measured on this machine, not inherited;
+- a path-copy edit path, and then a `Fragment`/`TreeBuilder` n-ary join that replaced the
+  general path outright: one descent emitting per-level fragments and one bottom-up build,
+  where the old code rebuilt nodes at every level of its descent. A single-scalar insert into
+  1 MB costs **2.6 µs** on the fast path and **12.8 µs** through the general path, the latter
+  down from 96.8 µs; `generalPathReplace` went from six cursor walks to two;
+- 97 tests in 13 suites, green.
+
+Running it opens an empty native window. Next up is M1.2 — byte, character, UTF-16 and line
+conversions, a bottom-up bulk loader, and a lazy cursor.
 
 ## Building
 
