@@ -1993,8 +1993,9 @@ exactly one failing test.
 
 Stage 1 recorded that two of its four real defects were errors in the task spec rather than in
 the implementation, and that this could not be audited because the spec was a prompt and no
-artifact survived. This time the spec was written to a file first. Its errors, so they are on the
-record:
+artifact survived. This time the spec was written to a file first, and that file is committed at
+`dev/specs/m1.1b-stage2.md` -- verbatim, not tidied up afterwards, because a spec edited after
+the fact cannot audit anything. Its errors, so they are on the record:
 
 1. **It stated the `0...2B` bound on a `Fragment` only as a description, never as an
    obligation.** The spec's type definition does carry `// 0...2B items` on both cases, so the
@@ -2095,6 +2096,25 @@ and it stays because it is labelled as one. Five of the nine rounds found someth
 rather than the code, and that is the honest shape of this milestone: the code converged after
 round 4 and the *record* took five more rounds to stop being wrong about itself. These paragraphs
 transcribe rounds 5 through 9; they are the loop's terminator, not a new batch.
+
+**One later addition, and what its cold read said.** The task spec and the general-path
+benchmark existed only in a session scratchpad, so both were committed afterwards --
+`dev/specs/m1.1b-stage2.md` and `RopePerfTests.generalPathInsertCost`. Until then **nothing in
+the repository measured the path this milestone rewrote**: `scalingRatio` measures the stage-1
+fast path, which absorbs any edit of at most 64 bytes and never reaches the general path, so the
+headline 96.8 -> 12.8 us had no regression protection at all. Its review recorded one finding
+worth carrying: **the benchmark asserts only an upper bound, so it can catch "too slow" but never
+"wrong path".** If `replaceSubrangeGeneralPathOnly` were ever rerouted through the public
+`replaceSubrange` dispatcher, its single-byte insert is exactly the shape `tryLeafLocalReplace`
+accepts -- the number would get *faster*, the bound would still pass, and the general path would
+silently lose its coverage again, with the differential correctness test none the wiser because
+the bytes come out identical either way. A lower bound would catch it and would also fire falsely
+the day the general path legitimately gets fast, so it is recorded rather than added. The other
+findings were a suspected missing `import Dispatch` (settled by the gate: it builds in debug and
+release and the benchmark ran) and three deviations from `scalingRatio`'s conventions -- the
+timed region includes an O(1) `utf8Count` read, the rope is grown across samples instead of
+reset, and the generator is re-seeded per size. All three are real and none changes a number at
+this magnitude; recorded, not acted on.
 
 ---
 

@@ -246,6 +246,44 @@ struct RopePerfTests {
         #expect(tenMBCost < 0.000_010, "\(tenMBMessage)")
     }
 
+    /// The **general** path's edit cost -- the path M1.1b stage 2 rewrote, and the one no
+    /// other benchmark here touches: `scalingRatio` above measures the stage-1 fast path,
+    /// which absorbs any edit of at most 64 bytes and so never reaches this code.
+    /// `replaceSubrangeGeneralPathOnly` is the `@testable` door that forces the general path,
+    /// and a single-scalar insert keeps the number comparable with the ~115 us the M1.1b
+    /// design recorded for the old `split`+`concat` implementation at 1 MB.
+    ///
+    /// Measured when it was added (release, this machine, median of three runs): **12.8 us at
+    /// 1 MB and 16.7 at 10 MB**, against 96.8 and 139.2 for the pre-stage-2 code in a
+    /// `git worktree` of the previous commit. The bound below is deliberately loose against
+    /// those numbers -- it is a regression tripwire, not a target, and the milestone record
+    /// warns that this operation has been seen to vary 94-352 us across separate binaries
+    /// built from identical source. Assert absolutely at both sizes, never as a ratio: a
+    /// uniformly slow implementation has an excellent ratio.
+    @Test("general path: single-scalar insert cost at 1 MB and 10 MB")
+    func generalPathInsertCost() {
+        for n in [1_000_000, 10_000_000] {
+            var rng = SplitMix64(seed: 0xBEEF_1234)
+            var rope = Rope(String(repeating: "abcdefgh", count: n / 8))
+            let one = Rope("x")
+            for _ in 0..<3 {
+                let at = Int(rng.next() % UInt64(rope.utf8Count))
+                rope.replaceSubrangeGeneralPathOnly(at..<at, with: one)
+            }
+            let samples = 30
+            let start = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<samples {
+                let at = Int(rng.next() % UInt64(rope.utf8Count))
+                rope.replaceSubrangeGeneralPathOnly(at..<at, with: one)
+            }
+            let mean = Double(DispatchTime.now().uptimeNanoseconds - start) / Double(samples)
+            print("generalPathInsertCost: n=\(n) mean \(mean / 1000.0) us")
+            #expect(
+                mean < 60_000,
+                "general-path insert at n=\(n) cost \(mean / 1000.0) us, over the 60 us bound")
+        }
+    }
+
     @Test("release without deep recursion: build and drop a ~64 MB rope a few times")
     func releaseWithoutDeepRecursion() {
         // Smoke test, not a proof: if `Node`'s release recursed per-item rather than
