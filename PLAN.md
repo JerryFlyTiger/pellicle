@@ -1518,6 +1518,12 @@ it barely passes is the defect this sub-milestone is about.
 
 #### M1.1b, designed and not started: the edit path
 
+*(Heading kept as it stood when M1.1 closed. **Stage 1 of this design shipped on 2026-09-08**
+-- the path copy with overflow and underflow repair, item (1) of the order below -- and has
+its own record further down this section. Items (2) and (3), `Fragment`/`TreeBuilder` and the
+`B` re-sweep, are still open. The design below is unedited and is still the specification for
+them.)*
+
 The architecture review of 2026-09-07 compared four designs against the measured problem
 (one single-byte insert rebuilds ~400 nodes: 211 `concatNodes`, 296 `makeInterior`, 106
 `makeLeaf` at 1 MB). Recommendation, with the comparison behind it:
@@ -1596,6 +1602,136 @@ recursively through `concat`; a 10 MB file would spend 110 ms in construction be
 else happens, so M1.2 wants a bottom-up bulk loader. No character/UTF-16/line conversion API
 (M1.2), no marker tree (M1.3), no interval tree (M1.4), no undo (M1.5), no line-indexed mmap
 view for huge read-only files.
+
+---
+
+### M1.1b stage 1: the path-copy edit path -- done 2026-09-08
+
+The edit path M1.1 left as designed-and-not-started. `SumTree.pathCopyEdit(where:edit:)`
+descends once to the leaf holding the flip item, hands that leaf's whole items array to an
+`edit` closure, and rebuilds only the `h+1` nodes on the path; every off-path subtree is
+shared verbatim and no neighbour is ever re-folded. `Rope.tryLeafLocalReplace` is the rope
+side of it, dispatched to from `replaceSubrange` whenever the inserted text is at most 64
+bytes. Gate: 64 tests -> **87**, and the whole suite got *faster*, 16.7 s -> 10.9 s.
+
+**Measured, by the main conversation, release, one process** (`swift test -c release`, the
+protocol this file's "How to measure" paragraph insists on):
+
+| n | before | after | |
+|---|---|---|---|
+| 10^4 | 26.8 us | **2.43 us** | 11x |
+| 10^5 | 72.3 us | **2.73 us** | 26x |
+| 10^6 | 120.6 us | **3.18 us** | **38x** |
+| 10^7 | 168.8 us | **4.58 us** | 37x |
+
+The target was under 10 us at 1 MB, asserted absolutely at both 1 MB and 10 MB rather than
+as a ratio -- the same bar at both sizes is a claim about the design's near-flat cost in `n`,
+not a number tuned until it passed. The architect's prototype measured 1.22-1.55 us; the
+shipped path is 3.18 us, about twice that. The gap is **not investigated** and is recorded
+rather than explained, because nothing depends on it at 3x under target.
+
+**The design, and the one rule that made it reviewable.** A private outcome enum
+(`.declined`/`.ok`/`.split`/`.underfull`) carries repair up the path. The recursion uses
+**non-root bounds at every level** and the root's looser bounds are special-cased exactly
+once, at the top, together with the collapse loop for a root interior left with one child.
+Underflow repair is merge-or-redistribute against one sibling: merge when the underfull
+node's entries plus the sibling's fit in `2B`, redistribute at the midpoint otherwise. Both
+provably land every node back in `[B, 2B]`, which is why **`checkInvariants()` keeps its
+assertions verbatim** -- the whole reason this was preferred to the relaxed invariant.
+
+The rule worth reusing: **the fast path never traps, it declines.** Every shape it cannot
+handle falls through to the general path's existing preconditions, so the milestone added no
+new trap and "did the fast path apply?" became a deterministic assertion instead of something
+visible only as a timing number. `tryLeafLocalReplace` is `package` precisely so a test can
+assert it returned `true` 500 times out of 500; a silent regression to the fallback is
+otherwise invisible, because `replaceSubrange` falls back without saying so.
+
+**What five cold reviews found after the gate was already green.** Two of the four defects
+were **errors in the task spec, not in the implementation**, which is the useful part:
+
+1. **The `bytes`-validity decline check was dead code.** It called `isScalarBoundary(bytes, 0)`
+   and `isScalarBoundary(bytes, bytes.count)`, both of which return `true` unconditionally at
+   exactly those two offsets, so the guard could never fire: `tryLeafLocalReplace(0..<0, with:
+   [0x80])` stored a lone continuation byte. `checkTreeInvariants()` cannot see that -- a
+   chunk's cached summary and `recomputedSummaryFromBytes()` come from the same scan, so a
+   malformed byte is counted identically on both sides of the comparison that exists to catch
+   a stale cache. The spec had asked for "the cheap check that it starts and ends on a
+   boundary", which is vacuous at those offsets. Replaced with a real UTF-8 validator.
+   *A cheap check that is cheap because it checks nothing is the failure mode to watch for.*
+2. **The no-op short-circuit bypassed the scalar-boundary check**, because the spec said to
+   return "before any tree walk". `insert("", at: 1)` at an offset inside a two-byte scalar
+   returned success where the file header requires a `precondition` to fire. Moved after the
+   guards; the boundary check is a read-only descent and worth paying for.
+3. **Four of the new validator's guards had no coverage, and nothing asserted that a *valid*
+   multi-byte scalar is accepted.** The second half matters more: a false *reject* would have
+   been invisible, because `replaceSubrange` silently falls back to the general path and every
+   content assertion would still pass. Eight tests added, five declines and one acceptance.
+4. **A test comment claimed a discriminating power its fixture did not have.** The 30/40-byte
+   fixture sums to 70, over the 64-byte coalesce threshold, so deleting the short-circuit it
+   was meant to protect did not make it fail. Rebuilt at 10/20 in a root leaf and **proved**:
+   removing the short-circuit fails the test, restoring it passes.
+
+**Mutations, executed by the main conversation** (the implementer never verifies its own
+fix). Four killed: sibling combine order in both the left and right branches (caught by the
+redistribute test's item-order assertion), the root collapse `children.count == 1`, and
+`tryLeafLocalReplace`'s leaf-boundary decline. Two survived:
+
+- The leaf-underflow threshold `<` -> `<=`: shape-only. It forces a needless merge on a leaf
+  already at `B`, but the combined counts still land in `[B, 2B]`, so no invalid tree exists
+  to observe. A performance boundary, not a correctness one.
+- **The coalesce floor `>` -> `>=`**, which the reviewer predicted would be caught fast by the
+  invariant checker. It was not, and the reason is the milestone's most useful finding: an
+  instrumented probe showed a relaxed guard genuinely takes a leaf from **6 items to 5**, so
+  the case is thoroughly reachable -- and no test fails because **stage 1's underflow repair
+  absorbs it**. The guard is a shape/performance choice here, not a correctness defence. The
+  spike README's caution ("guarding the coalesce with `items.count > B` fixed it") was true of
+  a prototype that had no repair; it is not a statement about this code.
+
+  *Two failed attempts at that isolation are worth more than the answer.* The first disabled
+  underflow reporting entirely and watched the checker fire -- confounded, because deletion
+  induces underflow too. The second asserted the post-edit leaf count unconditionally --
+  confounded again, because a plain delete legitimately leaves a leaf underfull for the repair
+  to fix. Only a **before/after comparison across the coalescing blocks** isolates "a coalesce
+  crossed the bound" from "something else did". A probe that fires for the right reason and
+  the wrong reason equally is not evidence, and it takes real care to notice that it isn't.
+
+**The adjacency assertion this file asked for was measured and not asserted.** M1.1b's design
+wanted a `Rope`-level assertion that no two adjacent chunks have byte counts summing to
+`<= 64`. It is not a postcondition of a leaf-local, guarded coalesce, and asserting it would
+have been false: the scan counts **15** such pairs in the large band and **2** in the small
+after an ordinary randomised run. It ships as a printed measurement. Two attempts to state in
+a comment *which* shapes an edit path cannot produce were each refuted by a cold read -- first
+"a shape no edit path can produce" (the 15 pairs refute it), then "any edit path reaching a
+root leaf would merge the pair" (`combineUnderflowedSiblings` merges two sibling leaves on
+item count alone and `collapseRoot` can make the result the root, so a root leaf can hold such
+a pair). The third version claims nothing general at all and states only the measured
+property. **Deleting the claim was the fix, twice attempted the other way first** -- the same
+lesson the formatting record above paid eleven rounds for.
+
+**Declined, with reasons.** Removing the coalesce guard to improve fill: deferred to stage 2's
+`B` re-sweep, where fill and iteration cost get measured together rather than one at a time.
+The join-point pair `combineUnderflowedSiblings` creates and nothing byte-sum-checks: a
+fill-policy gap, not a correctness one, unverified by construction, same deferral. Two wording
+preferences from the final round (a line-wrap artifact, and how much refutation history one
+comment should carry) are recorded and not acted on -- this paragraph is the loop's
+terminator, not a new batch.
+
+**`twentyThousandOperationsLargeRope` barely moved, 121.2 s -> 113.5 s, and that is not the
+rope.** `runModelProperty` recomputes `scalarBoundaries(model)` -- a full O(n) scan allocating
+an `[Int]` of every boundary -- on every one of its 20,000 operations, so at a 4 MB model the
+oracle is essentially the entire wall clock and an edit-path change of any size disappears
+into it. Left alone as out of this milestone's scope; recorded so nobody reads that number as
+a rope measurement. `millionOperationsSmallRope`, whose model is ~8 KB, went 16.25 s -> 7.50 s.
+
+**One pre-existing test was retuned**, and it was reviewed as such: the randomised model's
+small band went from `maxSize: 512` to `2048`. Tighter chunking means 512 bytes now fits in a
+single height-0 leaf, so the band stopped reaching the height 0->1 transition its own
+assertion requires. It still starts at 0 with no floor, so it still visits the empty rope.
+
+**Not done here, and still M1.1b's remaining half**: `Fragment` + `TreeBuilder` replacing the
+general path, deleting `buildFromNodes` and `Rope.concatMergingSeam`, and the `B` re-sweep
+with an iteration benchmark. The general `split`/`concat` path is untouched and still
+O(B*h^2); it now runs only for edits inserting more than 64 bytes or spanning a leaf boundary.
 
 ---
 
@@ -2110,17 +2246,24 @@ observations and not a rule.
 **Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the
 whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
-- **State**: M0 and M1.1 are done, each with a record in section 11. The gate is green
-  (`Test run with 64 tests in 13 suites passed`). The working tree is clean.
-- **Next work item**: **M1.1b**, the rope's edit path -- designed, prototyped, not started.
-  The design is the `#### M1.1b` subsection of the M1.1 record; the prototypes and their
-  cautions are in `dev/spikes/m1.1b-rope-edit-path/`. Its hard half is deletion's underflow
-  repair, which the prototype does not implement. Then M1.2 (byte/char/UTF-16/line
-  conversions, and a bottom-up bulk loader -- `Rope(String)` runs at ~91 MB/s today), M1.3
-  markers, M1.4 interval tree, M1.5 undo.
+- **State**: M0, M1.1 and **M1.1b stage 1** are done, each with a record in section 11. The
+  gate is green (`Test run with 87 tests in 13 suites passed`). The working tree is clean.
+  A single-scalar insert into 1 MB now costs **3.18 us**, down from 120.6 us.
+- **Next work item**: **M1.1b stage 2** -- `Fragment` + `TreeBuilder` replacing the general
+  path, deleting `buildFromNodes` and `Rope.concatMergingSeam`, then the `B` re-sweep with an
+  iteration benchmark added. The design is the `#### M1.1b` subsection of the M1.1 record; the
+  join prototype and its cautions are in `dev/spikes/m1.1b-rope-edit-path/`. Stage 1's record
+  lists two things deferred *into* stage 2 on purpose: whether to drop the leaf coalesce guard
+  now that underflow repair absorbs it, and the join-point pair `combineUnderflowedSiblings`
+  leaves un-checked. Both are fill questions and both want measuring alongside the `B` sweep,
+  not before it. Then M1.2 (byte/char/UTF-16/line conversions, and a bottom-up bulk loader --
+  `Rope(String)` runs at ~91 MB/s today), M1.3 markers, M1.4 interval tree, M1.5 undo.
 - **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`.
   Do not skip the trailing re-review; M1.1's worst defects were all found after the gate was
-  already green, and two of them were introduced by the fixes for the first one.
+  already green, and two of them were introduced by the fixes for the first one. Stage 1 ran
+  five review rounds on batches of 704, 323, 212, 40 and 17 lines -- the fourth still found a
+  false claim, and **two of its four real defects were errors in the task spec rather than in
+  the implementation**, so read a returned finding as evidence about the spec too.
 - `dev/mutate.py` is the harness for step 5. Read its header before trusting a survivor.
 
 ## Handover: state after M0, 2026-09-06
