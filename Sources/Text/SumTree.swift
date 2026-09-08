@@ -118,7 +118,13 @@ extension Node {
 }
 
 /// The branching factor. Fixed at 6 by PLAN.md 4.5 (Zed's `sum_tree` constant).
-private let branchingFactor = 6
+///
+/// `internal`, not `private`: `Rope.swift`'s leaf-local coalescing guard (see
+/// `tryLeafLocalReplace`) must never let a leaf drop below this same bound, so it reads
+/// this constant directly rather than keeping its own copy that could drift out of sync
+/// if this one were ever changed. Deliberately not `package`: nothing outside this module
+/// needs it.
+internal let branchingFactor = 6
 
 /// Joins two trees of any heights into one, preserving every invariant. The standard
 /// two-tree-join algorithm: equal heights merge (and split again if the merge overflows
@@ -375,6 +381,147 @@ private func findNode<Item: Summable>(
     }
 }
 
+/// The outcome of `pathCopyEditNode`'s descent into one node: what the caller one level up
+/// needs to do to splice the (possibly-changed-shape) result back into its own children/
+/// items list. Bounds quoted below (`B...2B`) are always the **non-root** bounds
+/// (`branchingFactor...2*branchingFactor`); root looseness is handled once, at
+/// `SumTree.pathCopyEdit`'s top level, not here — see that function's doc comment.
+private enum PathCopyOutcome<Item: Summable> {
+    /// `edit` declined; the whole operation aborts and the tree is untouched.
+    case declined
+    /// The node was rebuilt with `B...2B` entries (items for a leaf, children for an
+    /// interior), same height as the input.
+    case ok(Node<Item>)
+    /// The node overflowed and split into two nodes, each `B...2B` entries, same height as
+    /// the input. The caller splices both in, in place of the one it passed down.
+    case split(Node<Item>, Node<Item>)
+    /// The node underflowed: `0...B-1` entries, same height as the input. The caller must
+    /// repair this before it can accept the node as one of its own entries — see
+    /// `pathCopyEditNode`'s interior case.
+    case underfull(Node<Item>)
+}
+
+/// Combines two same-height, same-kind (both leaf or both interior) sibling nodes that
+/// together cover between `B+1` and `3B-1` entries (one of them was underfull, the other a
+/// normal `B...2B`) into either one merged node (`<= 2B` entries) or two redistributed
+/// nodes (`> 2B` entries, split down the middle so both land in `B...2B`). `left`/`right`
+/// must already be in tree order. Used only by `pathCopyEditNode`'s underflow repair.
+private func combineUnderflowedSiblings<Item: Summable>(
+    _ left: Node<Item>, _ right: Node<Item>
+) -> [Node<Item>] {
+    switch (left, right) {
+    case (.leaf(let a, _), .leaf(let b, _)):
+        let combined = a + b
+        if combined.count <= 2 * branchingFactor {
+            return [.makeLeaf(combined)]
+        }
+        let mid = combined.count / 2
+        return [.makeLeaf(Array(combined[0..<mid])), .makeLeaf(Array(combined[mid...]))]
+    case (.interior(let a, _, _), .interior(let b, _, _)):
+        let combined = a + b
+        if combined.count <= 2 * branchingFactor {
+            return [.makeInterior(combined)]
+        }
+        let mid = combined.count / 2
+        return [.makeInterior(Array(combined[0..<mid])), .makeInterior(Array(combined[mid...]))]
+    default:
+        preconditionFailure("combineUnderflowedSiblings: siblings must have equal height/kind")
+    }
+}
+
+/// The recursive descent behind `SumTree.pathCopyEdit`. Returns `nil` if `predicate` never
+/// becomes true within `node` (mirrors `cutNode`/`findNode`'s "not found" `nil`); otherwise
+/// an outcome describing what `node` became. See `pathCopyEdit`'s doc comment for the
+/// overall contract, and the type header comments above for what each outcome means to a
+/// caller one level up.
+private func pathCopyEditNode<Item: Summable>(
+    _ node: Node<Item>,
+    prefix: Item.Item_Summary,
+    predicate: (Item.Item_Summary) -> Bool,
+    edit: (_ items: [Item], _ index: Int, _ leafPrefix: Item.Item_Summary) -> [Item]?
+) -> PathCopyOutcome<Item>? {
+    switch node {
+    case .leaf(let items, _):
+        var cum = prefix
+        for i in 0..<items.count {
+            let next = cum + items[i].summary
+            if predicate(next) {
+                guard let newItems = edit(items, i, prefix) else { return .declined }
+                // One split suffices because a leaf is only ever handed to `edit` at its
+                // own `B...2B` cap and the replacement is built from those same items plus
+                // a small bounded splice (see `Rope.tryLeafLocalReplace`, this function's
+                // only caller's caller) — nowhere near `4B`, which is the point at which
+                // one split at the midpoint could fail to land both halves in `B...2B`.
+                precondition(
+                    newItems.count <= 4 * branchingFactor,
+                    "pathCopyEdit: edit grew a leaf beyond what one split can repair")
+                if newItems.count > 2 * branchingFactor {
+                    let mid = newItems.count / 2
+                    return .split(
+                        .makeLeaf(Array(newItems[0..<mid])), .makeLeaf(Array(newItems[mid...])))
+                } else if newItems.count < branchingFactor {
+                    return .underfull(.makeLeaf(newItems))
+                } else {
+                    return .ok(.makeLeaf(newItems))
+                }
+            }
+            cum = next
+        }
+        return nil
+    case .interior(let children, _, _):
+        var cum = prefix
+        for i in 0..<children.count {
+            let next = cum + children[i].summary
+            if predicate(next) {
+                guard
+                    let childOutcome = pathCopyEditNode(
+                        children[i], prefix: cum, predicate: predicate, edit: edit)
+                else {
+                    return nil
+                }
+                var cs = children
+                switch childOutcome {
+                case .declined:
+                    return .declined
+                case .ok(let n):
+                    cs[i] = n
+                    return .ok(.makeInterior(cs))
+                case .split(let a, let b):
+                    cs[i] = a
+                    cs.insert(b, at: i + 1)
+                    if cs.count > 2 * branchingFactor {
+                        let mid = cs.count / 2
+                        return .split(
+                            .makeInterior(Array(cs[0..<mid])), .makeInterior(Array(cs[mid...])))
+                    }
+                    return .ok(.makeInterior(cs))
+                case .underfull(let u):
+                    let isEmptyEntries: Bool
+                    switch u {
+                    case .leaf(let items, _): isEmptyEntries = items.isEmpty
+                    case .interior(let uc, _, _): isEmptyEntries = uc.isEmpty
+                    }
+                    if isEmptyEntries {
+                        cs.remove(at: i)
+                    } else if i > 0 {
+                        let combined = combineUnderflowedSiblings(cs[i - 1], u)
+                        cs.replaceSubrange((i - 1)...i, with: combined)
+                    } else {
+                        let combined = combineUnderflowedSiblings(u, cs[i + 1])
+                        cs.replaceSubrange(i...(i + 1), with: combined)
+                    }
+                    if cs.count < branchingFactor {
+                        return .underfull(.makeInterior(cs))
+                    }
+                    return .ok(.makeInterior(cs))
+                }
+            }
+            cum = next
+        }
+        return nil
+    }
+}
+
 /// The list of invariant violations `SumTree.checkInvariants()` found, if any.
 package struct SumTreeInvariantViolation: Error, CustomStringConvertible, Sendable {
     package let messages: [String]
@@ -558,6 +705,62 @@ package struct SumTree<Item: Summable>: Sendable {
                 checkNode(child, isRoot: false, violations: &violations)
             }
         }
+    }
+}
+
+extension SumTree {
+    /// The path-copy edit (M1.1b stage 1): descends once to the leaf containing the flip
+    /// item of `predicate`, replaces that leaf's items via `edit`, and rebuilds only the
+    /// `h+1` nodes on the path back to the root — every off-path subtree is shared
+    /// verbatim, and neither `concatNodes` nor `buildFromNodes` is ever called (contrast
+    /// `splitNode`/`cutNode`; see the file header). Both overflow (the edited leaf grows
+    /// past `2B`) and underflow (it shrinks below `B`, and that shortfall may cascade up
+    /// through a chain of ancestors) are repaired in the same descent, not just overflow.
+    ///
+    /// `predicate` must be monotone, exactly as `find`/`cut` require, with
+    /// `!predicate(.identity)` — a precondition enforces this, matching `cutNode`'s own
+    /// convention for the same reason: a predicate already true of the empty prefix has no
+    /// well-defined flip item for a leaf-local editor to be handed. Returns `nil` if
+    /// `predicate` never becomes true (including on an empty tree) or if `edit` declines.
+    ///
+    /// `edit` is handed the flip leaf's *whole* items array, the flip item's index within
+    /// it, and the summary of everything strictly before that leaf (not before the flip
+    /// item within the leaf); it returns the leaf's complete replacement items array, or
+    /// `nil` to decline, in which case `self` is left untouched (signalled by this
+    /// function's own `nil`).
+    package func pathCopyEdit(
+        where predicate: (Item.Item_Summary) -> Bool,
+        edit: (_ items: [Item], _ index: Int, _ leafPrefix: Item.Item_Summary) -> [Item]?
+    ) -> SumTree<Item>? {
+        precondition(!predicate(.identity), "pathCopyEdit: predicate must be false of .identity")
+        guard
+            let outcome = pathCopyEditNode(
+                root, prefix: .identity, predicate: predicate, edit: edit)
+        else {
+            return nil
+        }
+        switch outcome {
+        case .declined:
+            return nil
+        case .split(let a, let b):
+            return SumTree(root: SumTree.collapseRoot(.makeInterior([a, b])))
+        case .ok(let n), .underfull(let n):
+            return SumTree(root: SumTree.collapseRoot(n))
+        }
+    }
+
+    /// The root-only special case `pathCopyEditNode` deliberately does not handle (see its
+    /// type header): an underfull root is legal by construction (`checkNode` uses lower
+    /// bound 0 for a root leaf, 2 for a root interior), so the only repair a root itself
+    /// ever needs is collapsing away a now-pointless single-child level — the shape an
+    /// interior root is left in after an underflow repair removed one of its two children
+    /// entirely rather than merging or redistributing it.
+    private static func collapseRoot(_ node: Node<Item>) -> Node<Item> {
+        var current = node
+        while case .interior(let children, _, _) = current, children.count == 1 {
+            current = children[0]
+        }
+        return current
     }
 }
 

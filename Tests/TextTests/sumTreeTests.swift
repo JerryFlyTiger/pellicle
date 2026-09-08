@@ -355,4 +355,152 @@ struct SumTreeTests {
             try tree.checkInvariants()
         }
     }
+
+    // MARK: - pathCopyEdit (M1.1b stage 1)
+
+    /// A `>=`-style predicate against `IntSummary.count`, the same convention `Rope`'s own
+    /// `pathCopyEdit` callers use (see `Rope.tryLeafLocalReplace`) — the flip item is the
+    /// one whose *inclusive* cumulative count first reaches `k`.
+    private static func atLeast(_ k: Int) -> (IntSummary) -> Bool { { $0.count >= k } }
+
+    @Test(
+        "overflow: a leaf at exactly 2B items forced to 2B+1 splits, invariants hold, order preserved"
+    )
+    func pathCopyEditOverflowSplitsLeaf() throws {
+        // A single root leaf at exactly `2B` (12) items — legal (root leaf bound is
+        // `[0,2B]`) — edited to add one more, forcing the leaf-level overflow branch.
+        let tree = SumTree<IntItem>(items: Self.items(12))
+        let edited = try #require(
+            tree.pathCopyEdit(
+                where: Self.atLeast(12),
+                edit: { items, _, _ in items + [IntItem(value: 999)] }))
+        try edited.checkInvariants()
+        #expect(edited.height == 1, "expected the overflow split to grow the tree by one level")
+        #expect(edited.items().map(\.value) == Array(0..<12) + [999])
+        #expect(edited.summary.count == 13)
+    }
+
+    @Test(
+        "underflow by redistribute: a leaf pushed below B whose sibling has more than B ends both in [B,2B], parent child count unchanged"
+    )
+    func pathCopyEditUnderflowRedistributes() throws {
+        // Root interior, two leaf children: left has 8 (> B), right has 6 (exactly B).
+        // Removing one item from the right leaf drops it to 5 (< B); combined with the
+        // left sibling's 8 that is 13 (> 2B), so the repair must redistribute, not merge.
+        let leftItems = (0..<8).map { IntItem(value: $0) }
+        let rightItems = (8..<14).map { IntItem(value: $0) }
+        let left = Node<IntItem>.leaf(leftItems, IntSummary(count: leftItems.count))
+        let right = Node<IntItem>.leaf(rightItems, IntSummary(count: rightItems.count))
+        let root = Node<IntItem>.interior([left, right], IntSummary(count: 14), 1)
+        let tree = SumTree<IntItem>(root: root)
+        try tree.checkInvariants()
+
+        // Trigger on the very last item (value 13), the right leaf's last, and drop it.
+        let edited = try #require(
+            tree.pathCopyEdit(
+                where: Self.atLeast(14),
+                edit: { items, _, _ in Array(items.dropLast()) }))
+        try edited.checkInvariants()
+
+        guard case .interior(let children, _, _) = edited.root else {
+            Issue.record("expected an interior root")
+            return
+        }
+        #expect(children.count == 2, "parent child count should be unchanged by a redistribute")
+        for child in children {
+            guard case .leaf(let childItems, _) = child else {
+                Issue.record("expected both children to remain leaves")
+                continue
+            }
+            #expect(
+                (6...12).contains(childItems.count),
+                "redistributed leaf has \(childItems.count) items, outside [6,12]")
+        }
+        #expect(edited.items().map(\.value) == Array(0..<13))
+    }
+
+    @Test(
+        "underflow by merge, cascading: a sibling at exactly B merges with the underfull node, and the shortfall propagates one level up when the parent is itself at B"
+    )
+    func pathCopyEditUnderflowMergeCascades() throws {
+        // Three interior grandchildren (`parentA`, `parentB`, `parentC`) under one root,
+        // each an interior with exactly `B` (6) leaf children of `B` items apiece.
+        // `parentA` starts "itself at B" (6 children) — editing its first leaf child down
+        // to 5 items merges it with its sibling leaf (also 6, so combined 11 <= 2B: a
+        // merge, not a redistribute), dropping `parentA` to 5 children: underfull one
+        // level up from the edited leaf. That underflow must then be repaired at the
+        // root, one level further up still — the cascade this test is named for.
+        var value = 0
+        func makeParent() -> Node<IntItem> {
+            let leaves = (0..<6).map { _ -> Node<IntItem> in
+                let leafItems = (0..<6).map { _ -> IntItem in
+                    defer { value += 1 }
+                    return IntItem(value: value)
+                }
+                return Node<IntItem>.leaf(leafItems, IntSummary(count: leafItems.count))
+            }
+            let total = leaves.reduce(0) { $0 + $1.summary.count }
+            return Node<IntItem>.interior(leaves, IntSummary(count: total), 1)
+        }
+        let parentA = makeParent()
+        let parentB = makeParent()
+        let parentC = makeParent()
+        let totalBefore =
+            parentA.summary.count + parentB.summary.count + parentC.summary.count
+        let root = Node<IntItem>.interior(
+            [parentA, parentB, parentC], IntSummary(count: totalBefore), 2)
+        let tree = SumTree<IntItem>(root: root)
+        try tree.checkInvariants()
+        #expect(tree.height == 2)
+        let allValuesBefore = tree.items().map(\.value)
+
+        // Trigger on the very first item (value 0), `parentA`'s first leaf's first item,
+        // and drop it.
+        let edited = try #require(
+            tree.pathCopyEdit(
+                where: Self.atLeast(1),
+                edit: { items, _, _ in Array(items.dropFirst()) }))
+        try edited.checkInvariants()
+
+        #expect(edited.height == 2, "the cascade should not have collapsed the root")
+        guard case .interior(let topChildren, _, _) = edited.root else {
+            Issue.record("expected an interior root")
+            return
+        }
+        #expect(
+            topChildren.count == 2,
+            "expected the cascade to reach the root and merge two of its three children into one"
+        )
+        #expect(
+            edited.items().map(\.value) == Array(allValuesBefore.dropFirst()),
+            "order should be preserved with only the first item removed")
+    }
+
+    @Test(
+        "root collapse: deleting a whole leaf child of a two-child root interior collapses the root and decreases height"
+    )
+    func pathCopyEditRootCollapse() throws {
+        let leafA = (0..<6).map { IntItem(value: $0) }
+        let leafB = (6..<12).map { IntItem(value: $0) }
+        let root = Node<IntItem>.interior(
+            [
+                Node<IntItem>.leaf(leafA, IntSummary(count: leafA.count)),
+                Node<IntItem>.leaf(leafB, IntSummary(count: leafB.count)),
+            ], IntSummary(count: 12), 1)
+        let tree = SumTree<IntItem>(root: root)
+        try tree.checkInvariants()
+        #expect(tree.height == 1)
+
+        // Trigger on the last item (value 11), inside the second leaf, and empty it out
+        // entirely — that leaf's whole content is deleted, not just reduced.
+        let edited = try #require(
+            tree.pathCopyEdit(
+                where: Self.atLeast(12),
+                edit: { _, _, _ in [] }))
+        try edited.checkInvariants()
+
+        #expect(
+            edited.height == 0, "collapsing a two-child root to one child should drop height by 1")
+        #expect(edited.items().map(\.value) == Array(0..<6))
+    }
 }

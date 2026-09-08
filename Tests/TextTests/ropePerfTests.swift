@@ -221,20 +221,29 @@ struct RopePerfTests {
         )
 
         // A ratio across three decades of n is satisfied by an implementation that is
-        // uniformly slow — which is exactly what this rope was before this fix round: the
-        // ratio was a comfortable ~3.7 while every individual operation was ~100x too slow
-        // (measured 627 µs for a single-byte insert into a 1 MB rope; see
+        // uniformly slow — which is exactly what this rope was before the M1.1 fix round:
+        // the ratio was a comfortable ~3.7 while every individual operation was ~100x too
+        // slow (measured 627 µs for a single-byte insert into a 1 MB rope; see
         // `M1.1-perf-findings.md`). An absolute companion bound is the only thing that
-        // catches that. This floor (200 µs) is loose on purpose: it is this round's
-        // regression floor, not a target — round 2's path-copy rewrite tightens it to 10 µs
-        // (see `SumTree.swift`'s file header for what round 2 changes). Do not read a pass
-        // here as "the rope is fast"; read a failure as "it got slower than this round left
-        // it," which is the only claim this assertion is entitled to make.
+        // catches that. M1.1b stage 1's leaf-local path-copy edit (`SumTree.pathCopyEdit`,
+        // `Rope.tryLeafLocalReplace`) is what tightens this from that round's loose 200 µs
+        // regression floor to the 10 µs bound below, matching the design's own claim (see
+        // `SumTree.swift`'s file header): near-flat cost in `n`, so the same absolute bar
+        // applies at both 1 MB and 10 MB, not just a bar that scales with `n`. Do not read
+        // a pass here as "the rope is fast in general"; read a failure as "the leaf-local
+        // path regressed or stopped being taken," which is what this specific bound is
+        // entitled to claim.
         let oneMBCost = meanCosts[1_000_000]!
         let oneMBMessage =
-            "single-byte insert into a 1 MB rope took \(oneMBCost)s, over this round's 200 µs "
-            + "regression floor (release build)"
-        #expect(oneMBCost < 0.000_200, "\(oneMBMessage)")
+            "single-byte insert into a 1 MB rope took \(oneMBCost)s, over the 10 µs bound "
+            + "the M1.1b leaf-local path-copy edit is supposed to guarantee (release build)"
+        #expect(oneMBCost < 0.000_010, "\(oneMBMessage)")
+        let tenMBCost = meanCosts[10_000_000]!
+        let tenMBMessage =
+            "single-byte insert into a 10 MB rope took \(tenMBCost)s, over the same 10 µs "
+            + "bound as 1 MB — the design's near-flat-in-n claim is what this bound checks "
+            + "(release build)"
+        #expect(tenMBCost < 0.000_010, "\(tenMBMessage)")
     }
 
     @Test("release without deep recursion: build and drop a ~64 MB rope a few times")

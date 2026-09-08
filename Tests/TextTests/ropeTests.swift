@@ -147,6 +147,55 @@ struct RopeTests {
         #expect(empty.toString() == "hello")
     }
 
+    /// `append(Rope())` and `insert("", at:)` are genuine no-ops: `tryLeafLocalReplace`
+    /// returns `true` for `range.isEmpty && bytes.isEmpty` before ever walking the tree, so
+    /// neither content nor tree shape (including opportunistic chunk coalescing) should
+    /// change.
+    ///
+    /// The fixture is built via `Rope(unmergedChunks:)`, not through any edit path, and its
+    /// two chunks (10 and 20 bytes) sum to 30, comfortably `<= 64`. Draw no general conclusion
+    /// from that: adjacent pairs summing `<= 64` do survive in an ordinary rope (the Part D
+    /// scan below counts 15 in the large band), and two successive attempts to state *which*
+    /// shapes an edit path cannot produce were both refuted by cold reads — see
+    /// `Rope.init(unmergedChunks:)`'s comment for what they were and why this one now claims
+    /// nothing general. What matters here is only what was measured. This is a root leaf (`height ==
+    /// 0`), so `tryLeafLocalReplace`'s coalesce guard (`isWholeLeaf || newItems.count >
+    /// branchingFactor`) is bypassed and would merge these two chunks if a walk-and-repack
+    /// ran at all — which is exactly what makes this fixture able to tell "the no-op
+    /// short-circuit correctly skipped the walk" apart from "it walked and repacked but
+    /// happened not to trigger a merge" (an earlier 30/40-byte version of this fixture, sum
+    /// 70 > 64, could not tell those apart: deleting the short-circuit entirely still left
+    /// it passing). Verified directly (see the implementer's report): removing the
+    /// short-circuit makes this test fail against this fixture, and restoring it makes the
+    /// test pass again.
+    @Test("append(Rope()) and insert(\"\", at:) leave content and tree shape unchanged")
+    func appendAndInsertEmptyLeaveShapeUnchanged() {
+        var rope = Rope(
+            unmergedChunks: [
+                Chunk(bytes: Array(String(repeating: "x", count: 10).utf8)),
+                Chunk(bytes: Array(String(repeating: "y", count: 20).utf8)),
+            ])
+        let beforeContent = rope.toString()
+        let beforeHeight = rope.height
+        let beforeChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            beforeChunkCounts == [10, 20],
+            "fixture did not build two separate un-merged chunks: \(beforeChunkCounts)")
+        #expect(
+            beforeHeight == 0,
+            "fixture must be a single leaf (the whole tree) so the coalesce guard is bypassed")
+
+        rope.append(Rope())
+        #expect(rope.toString() == beforeContent)
+        #expect(rope.height == beforeHeight)
+        #expect(Array(rope.chunks()).map { Int($0.count) } == beforeChunkCounts)
+
+        rope.insert("", at: 10)
+        #expect(rope.toString() == beforeContent)
+        #expect(rope.height == beforeHeight)
+        #expect(Array(rope.chunks()).map { Int($0.count) } == beforeChunkCounts)
+    }
+
     @Test("summary after each edit equals the summary recomputed from the resulting string")
     func summaryTracksEdits() {
         var rope = Rope("line one\nline two\nline three")
@@ -330,6 +379,28 @@ struct RopeTests {
         var maxModelSize: Int
         var minSizeAfterMax: Int
         var maxRootHeight: UInt8
+        var finalAdjacentSmallChunkPairs: Int
+    }
+
+    /// Part D of M1.1b stage 1's implementer report: PLAN.md wants a `Rope`-level
+    /// assertion that no two adjacent chunks have byte counts summing to `<= 64` — but a
+    /// leaf-local coalesce guarded by `items.count > B` (see `Rope.tryLeafLocalReplace`)
+    /// cannot guarantee that across a leaf boundary, or whenever the guard blocks a
+    /// coalesce to protect the fill bound. This is deliberately a **measurement, not an
+    /// assertion**: it counts adjacent-chunk-pair violations and returns the count for the
+    /// implementer's report to print, not for a test to fail on. Do not turn this into an
+    /// `#expect` and do not tune a threshold against it — see the M1.1b stage 1 spec, Part
+    /// D, for why: the final form of any such check is not this round's call to make.
+    fileprivate static func countAdjacentSmallChunkPairs(_ rope: Rope) -> Int {
+        let chunks = Array(rope.chunks())
+        guard chunks.count > 1 else { return 0 }
+        var violations = 0
+        for i in 0..<(chunks.count - 1) {
+            if Int(chunks[i].count) + Int(chunks[i + 1].count) <= 64 {
+                violations += 1
+            }
+        }
+        return violations
     }
 
     /// Runs the randomised insert/delete/replace/slice property loop against a fresh
@@ -452,7 +523,8 @@ struct RopeTests {
 
         return RandomizedModelStats(
             maxModelSize: maxModelSize, minSizeAfterMax: minSizeAfterMax,
-            maxRootHeight: maxRootHeight)
+            maxRootHeight: maxRootHeight,
+            finalAdjacentSmallChunkPairs: Self.countAdjacentSmallChunkPairs(rope))
     }
 
     /// Two bands, not one. A single band cannot cover both ends of what this property test
@@ -512,6 +584,12 @@ struct RopeTests {
             label: "large band", seed: 0xABCD_1234_5678_9001, operationCount: 2000,
             initialSize: 8 * 1024, minSize: 8 * 1024, maxSize: 64 * 1024, deleteMaxWidth: 512,
             pastePool: pastePool, pasteChance: 40)
+        // Part D measurement (M1.1b stage 1's implementer report), not an assertion — see
+        // `countAdjacentSmallChunkPairs`'s doc comment for why this is printed, not
+        // `#expect`ed.
+        print(
+            "Part D: large band final adjacent-small-chunk-pair violations = "
+                + "\(largeStats.finalAdjacentSmallChunkPairs)")
         let largeOscillationMessage =
             "large band, seed 0xABCD123456789001: min size after max \(largeStats.minSizeAfterMax) "
             + "did not fall to at most half of max \(largeStats.maxModelSize) — the walk grew "
@@ -550,30 +628,42 @@ struct RopeTests {
             + "never reached 2"
         #expect(largeStats.maxRootHeight >= 2, "\(largeHeightMessage)")
 
-        // Small band: starts empty, no floor guard, capped low (512 bytes) — the band the
-        // large one above cannot cover. `checkTreeInvariants()` still runs every operation.
+        // Small band: starts empty, no floor guard, capped low — the band the large one
+        // above cannot cover. `checkTreeInvariants()` still runs every operation.
         //
-        // At this band's scale the large band's `deleteMaxWidth: 64` is enormous next to a
-        // ~2.4-byte mean insert and drags the walk straight back toward zero before it can
-        // ever cross a chunk/height boundary (measured: `maxModelSize` never exceeded 47
-        // bytes, height stayed 0, over 2,000 ops). Bringing `deleteMaxWidth` down to 3 turns
-        // the drift net-positive enough to reach the 512-byte cap and cross into height 1
-        // (measured: min 0, max 512, height 1) — but a net-positive, tiny-inserts-only drift
-        // is a one-way ratchet, not a random walk: `minSizeAfterMax` was 494, a 3.5% wobble
-        // at the top of the band, once that was measured instead of the vacuous whole-run
-        // minimum. The same fix as the large band's applies at this band's own scale: a
-        // small "paste" (50/150/300 bytes, 1-in-5 of inserts — proportionally far more
-        // frequent than the large band's 1-in-40, because 2,000 ops has to fit multiple
-        // round trips into a ~500-byte range rather than one into a ~50 KB range) supplies
-        // the growth, and `deleteMaxWidth: 16` (not 3) supplies enough background decay to
-        // bring it back down again between pastes. Measured after this change, same seed:
-        // **maxModelSize 512 (hit the cap), minSizeAfterMax 213 (fell to 42% of max, comfortably
-        // past the 50% oscillation bar), maxRootHeight 1**.
-        let smallPastePool = [50, 150, 300].map { String(repeating: "y", count: $0) }
+        // The cap here is 2048 bytes, not the 512 this band used before M1.1b's leaf-local
+        // edit path (`Rope.tryLeafLocalReplace`) existed, because 512 no longer forces a
+        // height >= 1 tree at all: a single leaf holds up to `2B` (12) chunks of up to 64
+        // bytes each — 768 bytes — and the leaf-local path's chunk-coalescing (unlike the
+        // pre-M1.1b `split`+`concat` path's seam-only merging) is tight enough to actually
+        // reach that ceiling before splitting, so a 512-byte cap sat entirely inside one
+        // leaf and this assertion could never pass again (measured after M1.1b landed,
+        // before this fix: `maxRootHeight` stayed 0 for the whole run). Raising the cap
+        // comfortably past the single-leaf ceiling (2048, not just past 768) restores
+        // headroom for the walk to cross the height boundary and come back down again, not
+        // just barely touch it once.
+        //
+        // At this band's scale the large band's `deleteMaxWidth: 64` was, before this fix,
+        // enormous next to a ~2.4-byte mean insert and dragged the walk straight back
+        // toward zero before it could ever cross a chunk/height boundary. With the cap
+        // raised, `deleteMaxWidth: 64` (this band's own prior value) is no longer enough
+        // background decay against pastes sized for the new, larger cap; a small "paste"
+        // (200/600/1200 bytes, scaled up with the cap, 1-in-5 of inserts — proportionally
+        // far more frequent than the large band's 1-in-40, because 2,000 ops has to fit
+        // multiple round trips into a ~2 KB range rather than one into a ~50 KB range)
+        // supplies the growth. Measured after this change, same seed: **maxModelSize 2043
+        // (essentially hit the 2048 cap), minSizeAfterMax 688 (fell to 34% of max,
+        // comfortably past the 50% oscillation bar), maxRootHeight 1**.
+        let smallPastePool = [200, 600, 1200].map { String(repeating: "y", count: $0) }
         let smallStats = Self.runRandomizedModel(
             label: "small band", seed: 0x5CA1_ABE1_5001, operationCount: 2000, initialSize: 0,
-            minSize: 0, maxSize: 512, deleteMaxWidth: 16, pastePool: smallPastePool,
+            minSize: 0, maxSize: 2048, deleteMaxWidth: 64, pastePool: smallPastePool,
             pasteChance: 5)
+        // Part D measurement, not an assertion — see the large band's identical print
+        // above and `countAdjacentSmallChunkPairs`'s doc comment.
+        print(
+            "Part D: small band final adjacent-small-chunk-pair violations = "
+                + "\(smallStats.finalAdjacentSmallChunkPairs)")
         let smallOscillationMessage =
             "small band, seed 0x5CA1ABE15001: min size after max \(smallStats.minSizeAfterMax) "
             + "did not fall to at most half of max \(smallStats.maxModelSize) — the walk grew "
@@ -585,6 +675,300 @@ struct RopeTests {
             "small band, seed 0x5CA1ABE15001: max root height \(smallStats.maxRootHeight) "
             + "never left 0 — the small band never exercised the height 0->1 transition"
         #expect(smallStats.maxRootHeight >= 1, "\(smallHeightMessage)")
+    }
+
+    // MARK: - Fast leaf-local edit path (M1.1b stage 1)
+
+    /// `tryLeafLocalReplace` is `package`, not `private`, specifically so this test can
+    /// assert it is actually *taken* on a representative workload: a silent regression
+    /// back to the general `split`+`concat` path would otherwise show up only as a timing
+    /// number, not a test failure. 500 single-scalar inserts at random scalar-boundary
+    /// offsets into a ~1 MB rope, all-ASCII so every byte offset is a boundary.
+    @Test("the fast path is taken: 500 single-scalar inserts into a ~1 MB rope")
+    func fastPathIsTaken() {
+        var rng = SplitMix64(seed: 0xFA57_0001)
+        var rope = Rope(String(repeating: "m", count: 1_000_000))
+        for opIndex in 0..<500 {
+            let at = Int(rng.next() % UInt64(rope.utf8Count + 1))
+            let ok = rope.tryLeafLocalReplace(at..<at, with: Array("x".utf8))
+            #expect(ok, "op \(opIndex): fast path declined for a single-scalar insert at \(at)")
+        }
+    }
+
+    /// Randomised differential (500 ops): the same edit, applied to two copies of the same
+    /// starting rope — one through the normal dispatch (`replaceSubrange`, which tries
+    /// `tryLeafLocalReplace` first), the other forced through the general `split`+`concat`
+    /// path only (`replaceSubrangeGeneralPathOnly`) — must produce byte-identical content
+    /// and equal summaries, with invariants holding on both. Tree *shape* is not asserted
+    /// equal: the two paths are not required to balance a tree the same way, only to agree
+    /// on what the tree means (see this suite's file header).
+    @Test("differential: the fast dispatch path and the general split+concat path agree")
+    func fastAndGeneralPathsAgree() {
+        var rng = SplitMix64(seed: 0xFA57_FA57_0001)
+        let initial = String(repeating: "m", count: 4096)
+        var fastCopy = Rope(initial)
+        var generalCopy = Rope(initial)
+        let pool: [String] = [
+            "a", "bb", "ccc", "\n", "é", "字", "🙂", String(repeating: "x", count: 40),
+        ]
+
+        for opIndex in 0..<500 {
+            let byteArray = Array(fastCopy.bytes())
+            let boundaries = Self.scalarBoundaries(byteArray)
+            guard
+                let (lo, hi) = Self.boundedRange(boundaries, maxWidth: 32, using: &rng)
+            else {
+                continue
+            }
+            let text = pool[Int(rng.next() % UInt64(pool.count))]
+            let other = Rope(text)
+
+            fastCopy.replaceSubrange(lo..<hi, with: other)
+            generalCopy.replaceSubrangeGeneralPathOnly(lo..<hi, with: other)
+
+            #expect(
+                fastCopy.toString() == generalCopy.toString(),
+                "op \(opIndex): content diverged between the fast and general paths")
+            #expect(
+                fastCopy.summary == generalCopy.summary,
+                "op \(opIndex): summary diverged between the fast and general paths")
+            do {
+                try fastCopy.checkTreeInvariants()
+            } catch {
+                Issue.record("op \(opIndex): fast-path copy invariant violation \(error)")
+            }
+            do {
+                try generalCopy.checkTreeInvariants()
+            } catch {
+                Issue.record("op \(opIndex): general-path copy invariant violation \(error)")
+            }
+        }
+    }
+
+    // MARK: - Fast path: declines
+
+    @Test("declines: bytes.count > 64 leaves the rope untouched")
+    func declinesOverLongInsert() {
+        var rope = Rope(String(repeating: "m", count: 200))
+        let before = rope
+        let tooLong = Array(String(repeating: "x", count: 65).utf8)
+        #expect(rope.tryLeafLocalReplace(10..<10, with: tooLong) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: a range spanning past one leaf's byte span leaves the rope untouched")
+    func declinesRangeSpanningLeaves() {
+        // 5,000 bytes is comfortably past a single leaf's `2B * 64 = 768`-byte ceiling, so
+        // this rope has multiple leaves; a 2,000-byte range starting at 0 cannot possibly
+        // fit inside one.
+        var rope = Rope(String(repeating: "m", count: 5_000))
+        #expect(rope.height >= 1)
+        let before = rope
+        #expect(rope.tryLeafLocalReplace(0..<2_000, with: []) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: a non-scalar-boundary offset leaves the rope untouched")
+    func declinesNonScalarBoundary() {
+        // "é" is 2 bytes; offset 1 lands inside it.
+        var rope = Rope("é" + String(repeating: "m", count: 100))
+        let before = rope
+        #expect(rope.isScalarBoundary(1) == false)
+        #expect(rope.tryLeafLocalReplace(1..<1, with: Array("x".utf8)) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: a no-op at a non-scalar-boundary offset does not bypass the boundary check")
+    func declinesNoOpAtNonScalarBoundary() {
+        // "é" is 2 bytes; offset 1 lands inside it. `range.isEmpty && bytes.isEmpty` looks
+        // like a genuine no-op, but before the no-op short-circuit was moved to run after
+        // the scalar-boundary guards, this call returned `true` here anyway — bypassing the
+        // boundary check entirely. This asserts the decline: the general path this falls
+        // back to then `precondition`-traps with "byte offset 1 is not a scalar boundary",
+        // which is the intended behaviour for a non-boundary offset (see this file's
+        // header), but that trap is exercised by the general dispatch path, not by
+        // `tryLeafLocalReplace` itself, so it is not what this test asserts.
+        var rope = Rope("é" + String(repeating: "m", count: 100))
+        let before = rope
+        #expect(rope.isScalarBoundary(1) == false)
+        #expect(rope.tryLeafLocalReplace(1..<1, with: []) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: an over-long 3-byte encoding leaves the rope untouched")
+    func declinesOverLong3ByteEncoding() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xE0 0x80 0x80 decodes to U+0000; the minimum scalar a 3-byte encoding may
+        // represent is U+0800, so this is an over-long encoding.
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xE0, 0x80, 0x80]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: an over-long 4-byte encoding leaves the rope untouched")
+    func declinesOverLong4ByteEncoding() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xF0 0x80 0x80 0x80 decodes to U+0000; the minimum scalar a 4-byte encoding may
+        // represent is U+10000, so this is an over-long encoding.
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xF0, 0x80, 0x80, 0x80]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: a UTF-16 surrogate leaves the rope untouched")
+    func declinesSurrogate() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xED 0xA0 0x80 decodes to U+D800, the first UTF-16 surrogate code point; no
+        // surrogate is a valid scalar in UTF-8.
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xED, 0xA0, 0x80]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: a scalar past U+10FFFF leaves the rope untouched")
+    func declinesScalarPastMax() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xF4 0x90 0x80 0x80 decodes to U+110000, one past the maximum valid scalar
+        // U+10FFFF.
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xF4, 0x90, 0x80, 0x80]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test(
+        "declines: a lead byte followed by a present but non-continuation byte leaves the rope untouched"
+    )
+    func declinesLeadByteFollowedByNonContinuation() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xC2 is a valid 2-byte lead byte, but 0x41 ('A') is not a continuation byte —
+        // unlike `declinesTruncatedTwoByteSequence`, the second byte is present, just wrong.
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xC2, 0x41]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    /// Every other `tryLeafLocalReplace` test either asserts a decline, or reaches the fast
+    /// path only through `replaceSubrange`/`insert`/`append`, which silently falls back to
+    /// the general path whenever the fast path declines. So if `isValidUTF8` ever wrongly
+    /// rejected a valid multi-byte scalar, every content assertion in this suite would still
+    /// pass — the only symptom would be a quiet fall-through to the slower general path.
+    /// Calling `tryLeafLocalReplace` directly and asserting `true` (not just checking the
+    /// resulting bytes) is what would catch that false reject.
+    @Test("the fast path accepts valid 2-, 3- and 4-byte scalars, not just declines them")
+    func fastPathAcceptsValidMultiByteScalars() {
+        var rope = Rope(String(repeating: "m", count: 5_000))
+        #expect(rope.height >= 1, "fixture must have interior nodes")
+        var expectedBytes = Array(String(repeating: "m", count: 5_000).utf8)
+        var offset = 10
+        for scalar in ["é", "字", "🙂"] {
+            let bytes = Array(scalar.utf8)
+            let ok = rope.tryLeafLocalReplace(offset..<offset, with: bytes)
+            #expect(ok, "fast path declined a valid \(scalar) insert")
+            expectedBytes.insert(contentsOf: bytes, at: offset)
+            offset += bytes.count
+        }
+        #expect(Array(rope.bytes()) == expectedBytes)
+    }
+
+    @Test("declines: an empty rope leaves the rope untouched")
+    func declinesEmptyRope() {
+        var rope = Rope()
+        let before = rope
+        #expect(rope.tryLeafLocalReplace(0..<0, with: Array("x".utf8)) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    /// The empty rope declines even for a *genuine* no-op (empty range, empty bytes), because
+    /// the `utf8Count > 0` guard runs before the no-op short-circuit. That ordering is what
+    /// the doc comment promises ("declines when the rope is empty"), and the general path
+    /// then handles it identically, so this pins behaviour rather than protecting content.
+    /// Without it the ordering is unobservable: a change restoring fast-accept here — after
+    /// the scalar-boundary guards, so the non-boundary fix stayed intact — passed the entire
+    /// suite when a cold reviewer looked for it.
+    @Test("declines: an empty rope even for a genuine no-op")
+    func declinesEmptyRopeNoOp() {
+        var rope = Rope()
+        #expect(rope.tryLeafLocalReplace(0..<0, with: []) == false)
+        #expect(rope.isEmpty)
+    }
+
+    @Test("declines: a lone continuation byte leaves the rope untouched")
+    func declinesLoneContinuationByte() {
+        var rope = Rope("hello")
+        let before = rope
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0x80]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: a truncated two-byte sequence leaves the rope untouched")
+    func declinesTruncatedTwoByteSequence() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xC2 is a valid 2-byte lead but there is no following continuation byte.
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xC2]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    @Test("declines: an invalid lead byte leaves the rope untouched")
+    func declinesInvalidLeadByte() {
+        var rope = Rope("hello")
+        let before = rope
+        // 0xC0 and 0xC1 are never valid UTF-8 lead bytes (over-long 2-byte forms).
+        #expect(rope.tryLeafLocalReplace(0..<0, with: [0xC0, 0x80]) == false)
+        #expect(rope == before)
+        #expect(Array(rope.bytes()) == Array(before.bytes()))
+    }
+
+    // MARK: - Leaf-local delete coalescing across the removed run (fix for Part D gap)
+
+    /// Deletes exactly one whole chunk's byte span from between two other chunks inside a
+    /// single leaf and asserts the two now-adjacent neighbours were merged, rather than left
+    /// as two chunks sitting next to each other unmerged — the case the fast path's
+    /// `newChunks.isEmpty` early return used to skip coalescing for entirely.
+    ///
+    /// The three chunks (30, 40, 30 bytes) are built via three separate general-path
+    /// appends, each seam sized so `concatMergingSeam` declines to merge it (every pairwise
+    /// sum among adjacent originals is 70 > 64) — the only way to get three genuinely
+    /// separate, un-coalesced chunks sitting in one leaf, since any single edit whose total
+    /// span is <= 64 bytes gets repacked into one chunk by `packChunks`. Removing the middle
+    /// (40-byte) chunk's exact byte span leaves the two 30-byte chunks adjacent, and
+    /// 30 + 30 = 60 <= 64, so they are expected to merge.
+    @Test("a leaf-local delete that removes a whole chunk coalesces its neighbours")
+    func leafLocalDeleteOfWholeChunkCoalesces() {
+        var rope = Rope(String(repeating: "x", count: 30))
+        rope.replaceSubrangeGeneralPathOnly(
+            rope.utf8Count..<rope.utf8Count, with: Rope(String(repeating: "y", count: 40)))
+        rope.replaceSubrangeGeneralPathOnly(
+            rope.utf8Count..<rope.utf8Count, with: Rope(String(repeating: "z", count: 30)))
+        #expect(
+            rope.height == 0, "fixture must be a single leaf for this to exercise the fast path")
+        let originalChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            originalChunkCounts == [30, 40, 30],
+            "fixture did not build three separate un-merged chunks: \(originalChunkCounts)")
+
+        let ok = rope.tryLeafLocalReplace(30..<70, with: [])
+        #expect(ok, "fast path declined the whole-chunk delete")
+        let expectedContent = String(repeating: "x", count: 30) + String(repeating: "z", count: 30)
+        #expect(rope.toString() == expectedContent)
+
+        let finalChunkCounts = Array(rope.chunks()).map { Int($0.count) }
+        #expect(
+            finalChunkCounts == [60],
+            "expected the two 30-byte neighbours to coalesce into one 60-byte chunk, got \(finalChunkCounts)"
+        )
     }
 
     // MARK: - Fragmentation guard
