@@ -330,6 +330,7 @@ best of three):
 | plain `package func` (cold default) | 0.3309 s | 0.3319 s | 0.3313 s |
 | `@inlinable` member of a **`public`** type | **0.0135 s** | 0.0135 s | 0.0762 s |
 | `@inlinable` member of a **`package`** type | 0.0763 s | 0.0133 s | 0.0763 s |
+| `@inlinable` member of a **`@usableFromInline package`** type | **inlined** (see below) | -- | -- |
 
 Three things follow. The promoted shape reaches the same peak with no flags as package CMO
 does with them, so the flags buy no speed — only the ability to keep the hot surface at
@@ -339,6 +340,37 @@ of `CLAUDE.md` got this wrong). And library evolution without CMO is a 5.6x clif
 promoted shape, so a design resting on package CMO rests on an optimiser pass whose
 bail-outs are silent, with a worse floor than doing nothing. Rejected alternatives and the
 falsification plan are in 4.16.
+
+**Amended 2026-09-09 (M1.2), and it changes what "promoted" means.** The table's fourth row
+was never measured, and it is the row that matters: **`@usableFromInline` on a `package` type
+is a promotion.** With the hot members `@inlinable`, it is inlined across the boundary with no
+flags, at the same speed as the `public` shape -- measured on M1.2's cursor at 3.49 ns/chunk
+against `public`'s 3.56 -- and it changes **no public API surface**. Isolated on this
+project's own probe harness: with `@usableFromInline` on the type the member's symbol is
+absent from the calling module's object file; delete that one attribute and the undefined
+symbol reappears, with the type's plain-`package` `init` keeping its symbol in both as the
+control. So "promote the type" above is right and "the containing type becomes `public`" is
+one remedy, not the only one, and not the one to reach for first: `Text` is not a package
+product, so `public` serves no external client, forfeits the `package`-vs-`public` signal and
+emits symbols dead-code stripping can no longer remove. **Default to `@usableFromInline
+package`; reach for `public` only when something outside the package must call it.** The real
+price is different from the one this paragraph used to imply: promotion drags stored
+properties and helpers from `private` to `internal`, so what is traded away is module-internal
+encapsulation, not API surface.
+
+Two corollaries, both learned the expensive way in M1.2:
+
+- **The promotion unit is the whole call chain the benchmark walks, not the entry point.**
+  Promoting `SumTreeCursor.next()` while leaving `descendLeftmost`/`advanceToNextLeaf` merely
+  visible recovered ~35% of the win (20.7 ns/chunk against 3.56). Those two run once per leaf,
+  i.e. once per <= 6 chunks, and an opaque cross-module call there cost ~17 ns/chunk by itself.
+- **A plain-`package` `@inlinable` is not merely ineffective, it is unchecked.** The compiler
+  does not verify `@inlinable` bodies while the enclosing type is plain `package`. Adding
+  `@usableFromInline` to `TextMetric` immediately produced six "`TextSummary` is package and
+  cannot be referenced from an `@inlinable` function" errors against code that compiled
+  silently before. Such an annotation therefore cannot even be trusted as a statement of
+  intent, and accumulates references a later promotion cannot honour. Write it or do not, but
+  do not leave it decorating a `package` type.
 
 The promoted hot surface is listed here explicitly, because it is now a source-level
 decision rather than a build-flag one, and it is guarded by `dev/check-inlining.sh` (one
@@ -447,13 +479,36 @@ milestone, because retrofitting it later is how every custom editor ends up inac
 
 ```swift
 struct Chunk { var bytes: InlineArray<64, UInt8>; var count: UInt8 }          // leaf payload
-struct TextSummary { utf8, utf16, lines, firstLineLen, lastLineLen, maxLineLen } // monoid
+struct TextSummary { utf8, utf16, scalars, lines, firstLineLen, lastLineLen, maxLineLen } // monoid
 enum Node<Item: Summable> { case leaf([Item], Summary); case interior([Node], Summary, height) }
 final class TextBuffer { root: Node<Chunk>; overlays: Node<OverlayRecord>; history; clock }
 struct BufferSnapshot: Sendable { root, overlays, clock }   // O(1) to take, free to share
 final class MarkerTree { /* order-statistics tree of marker positions with lazy offsets */ }
 struct Anchor: Sendable, Hashable { markerID, bias }  // resolved against a snapshot's MarkerTree
 ```
+
+**The complexity table.** M1's definition of done in section 8 says "complexity benchmarks
+match the table in 4.5". Until 2026-09-09 there was no table -- only the O(...) claims woven
+through the prose below, which made that criterion unauditable. Here it is, with where each
+claim is verified. "Measured" means a benchmark in the tree asserts it; the rest are promises
+the milestone that implements them owes. One row -- chunk streaming -- is **not** a tidying-up
+of the prose below, which never promised it: it enters the table from `dev/specs/m1.2.md`
+deliverable C, because M1.2 built the primitive and it now has a cost worth holding. A cold
+read caught the table claiming otherwise about itself.
+
+| Operation | Promised | Owner | Status |
+|---|---|---|---|
+| Take a snapshot | O(1) | M1.1 | measured: structural sharing, snapshot isolation tests |
+| Single-scalar insert, fast path | O(log n) | M1.1b | measured: 2.57 us at 1 MB, 3.90 at 10 MB |
+| Single-scalar insert, general path | O(log n) | M1.1b | measured: 12.8 us at 1 MB, 16.7 at 10 MB |
+| Build a rope from a `String` | O(n) | M1.2 | measured: 1.9-3.9 ms at 1 MB, 20.9-24.5 ms at 10 MB (the build it replaced: 2.60 and 25.72) |
+| byte <-> UTF-16 <-> scalar <-> line/column conversion | O(log n) | M1.2 | measured: 0.53 us at 1 MB, 0.77 at 10 MB (descent plus a <= 64-byte chunk scan, never a scan from the start) |
+| Stream every chunk in order | O(1) per chunk, no allocation | M1.2 | measured: **3.86 / 4.01 ns/chunk** cross-module at 1 MB / 10 MB, against 18.23 / 16.93 for the flatten it replaced, both arms alternating in one process; 27-57 ns/chunk before the 4.2 promotion |
+| Marker lookup | O(log n) | M1.3 | not yet built |
+| Adjust every marker after an edit | O(log n) regardless of marker count | M1.3 | not yet built; M1's DoD names one million markers |
+| Overlay / text-property lookup | O(log n + k) | M1.4 | not yet built |
+| Open a 2 GB file read-only | under one second | **M1.6** | not yet built |
+| Close a large buffer | iterative, no recursion | M1.1 | measured: no-deep-recursion release test |
 
 - Persistent B+-tree rope; every mutation rebuilds the path to the edited leaves, so
   snapshots are structural sharing and background readers never lock.
@@ -477,7 +532,10 @@ struct Anchor: Sendable, Hashable { markerID, bias }  // resolved against a snap
   logs plus retained snapshot checkpoints; branches are native, so an undo-tree UI is a view.
 - Multi-cursor edits are one transaction with per-anchor bias rules.
 - Read-only huge files (GB logs) are viewed through a line-indexed mmap without building a
-  rope until the first edit.
+  rope until the first edit. **This is M1.6.** It was in M1's definition of done from the
+  start and belonged to no sub-milestone until 2026-09-09 -- not in section 8's M1.1-M1.5
+  split, and listed as an open gap in the M1.1b stage 1 record with no owner. A criterion no
+  sub-milestone owns is a criterion the family cannot meet.
 - Node arrays are value types; the one ARC hazard measured in the spike (recursive release
   of long chains) is avoided because tree height is logarithmic, and closing a large buffer
   drops subtrees iteratively.
@@ -1090,7 +1148,7 @@ recorded oracle transcript or a measurement, never by reading code.
 **Milestone granularity.** Reticle's milestones were the size of one command (`kill-whole-
 line` was M110). Each Phase A entry above is a *family* whose record splits it into numbered
 sub-milestones (M1.1 rope, M1.2 summaries and conversions, M1.3 marker tree, M1.4 interval
-tree, M1.5 undo; M5.1 buffers and faces, M5.2 keymaps and rich keys, M5.3 the run queue
+tree, M1.5 undo, M1.6 the line-indexed mmap view for huge read-only files; M5.1 buffers and faces, M5.2 keymaps and rich keys, M5.3 the run queue
 and nested loop, M5.4 hooks and budgets, M5.5 minibuffer, M5.6 completion protocols, M5.7
 processes and timers, M5.8 DisplaySnapshot and the headless driver; and so on), each with
 one falsifiable definition of done, executed one at a time through the loop in `CLAUDE.md`.
@@ -1718,7 +1776,12 @@ only as a ratio.
 
 **Known gaps.** `Rope(String)` for 1 MB takes ~11 ms (~91 MB/s) because `SumTree.build` halves
 recursively through `concat`; a 10 MB file would spend 110 ms in construction before anything
-else happens, so M1.2 wants a bottom-up bulk loader. No character/UTF-16/line conversion API
+else happens, so M1.2 wants a bottom-up bulk loader. *(Amended 2026-09-09, M1.2: **do not
+quote these two numbers.** The 110 ms was a linear extrapolation, never measured. And the
+~11 ms stopped being true within this same milestone family -- stage 2's `joinNodes` rewrite
+sped this build up as an unmeasured side effect, and M1.2 measured what was actually in the
+tree at 2.60 ms for 1 MB and 25.72 ms for 10 MB. M1.2's record carries the correction and what
+it cost: a bound written against the stale figure claimed to catch a regression it could not.)* No character/UTF-16/line conversion API
 (M1.2), no marker tree (M1.3), no interval tree (M1.4), no undo (M1.5), no line-indexed mmap
 view for huge read-only files.
 
@@ -2236,6 +2299,258 @@ this magnitude; recorded, not acted on.
 
 ---
 
+### M1.2: conversions, bulk loader, lazy cursor -- done 2026-09-09
+
+Spec: `dev/specs/m1.2.md`, plus `dev/specs/m1.2-promotion-and-guards.md` for the fix round.
+Gate: **123 tests in 15 suites**, green, re-run by the main conversation after the cold-read fix round (119 before it; the four new tests are the cold reads' own findings turned into coverage). Perf suite: 10 of 10
+whole-suite runs green after the two bound fixes below.
+
+**What shipped.** All three deliverables, plus the two acceptance obligations the spec named.
+
+| | Measured (this machine, release `-O -wmo`, main conversation) | Before |
+|---|---|---|
+| `Rope(String)` at 1 MB | **1.85-3.86 ms** whole-suite, 1.72-1.94 ms alone | **2.60 ms** |
+| `Rope(String)` at 10 MB | **20.9-24.5 ms** | **25.72 ms** |
+| `Rope.convert` at 1 MB / 10 MB | **0.46-1.57 us** | did not exist |
+| `chunks()` streaming, cross-module | **3.86 / 4.01 ns/chunk** | 18.23 / 16.93 (flatten, same process) |
+
+Conversions are one `TextMetric` enum over `utf8`/`utf16`/`scalars`/`lines` plus one generic
+routine on `SumTree.find`, not eight hand-written functions -- the same reasoning stage 2 used
+when it deleted `buildFromNodes`. The bulk loader replaced `SumTree.build`'s recursive halving
+in the **generic** layer rather than adding a `Rope`-only fast path, because `build` is the
+single shared bottleneck three call sites reach today and M1.3's marker tree will be the
+fourth. The cursor is written from scratch: nothing in the module streamed before it.
+
+**The cursor was reported as failing its acceptance, and it was not.** The implementer measured
+43 ns/chunk against a 5.5-5.8 baseline and flagged it as the milestone's one unmet target,
+guessing at cross-module dispatch but declining to act because it read the fix as an
+architecture decision. A main-conversation diagnostic settled it in one run -- same process,
+same rope, same code, 31.8 ns/chunk called from the test module against **3.58 in-module**. The
+algorithm was never the problem.
+
+#### The promotion, and what "promote" turns out to mean
+
+4.2 has been amended; this is the record of why. An architect pass found the question's premise
+false. Every option considered assumed promotion meant `public`. **`@usableFromInline` on a
+`package` type, with `@inlinable` on the hot members, is also a promotion** -- measured at 3.49
+ns/chunk against `public`'s 3.56, with **no public API surface at all**. It was isolated on this
+project's own probe harness rather than argued: with the attribute the member's symbol is absent
+from the calling module's object file, without it the undefined symbol reappears, and the type's
+plain-`package` `init` keeps its symbol in both as the control. 14 declarations, two files,
+nothing `public`. The price is that eight members go `private` -> `internal`: module-internal
+encapsulation, not API.
+
+Two corollaries worth more than the change itself:
+
+- **The promotion unit is the whole call chain the benchmark walks.** Promoting `next()` alone
+  recovered ~35% (20.7 ns/chunk). `descendLeftmost`/`advanceToNextLeaf` run once per leaf, once
+  per <= 6 chunks, and an opaque call there cost ~17 ns/chunk by itself.
+- **A plain-`package` `@inlinable` is unchecked, not merely ineffective.** Adding
+  `@usableFromInline` to `TextMetric` immediately produced six "`TextSummary` is package and
+  cannot be referenced from an `@inlinable` function" errors against code that compiled
+  silently. M1.2 had shipped exactly such an annotation; it is deleted, and `TextMetric` is
+  recorded as a promotion candidate whose benchmark has not asked for it.
+
+`dev/check-inlining.sh` now guards this literally. Probes alone cannot: deleting
+`SumTreeCursor`'s attribute costs 8x, leaves every probe green and every test passing. So the
+script gained a third *warm* probe shape (does the toolchain still do this?) **and** a grep over
+the real declarations by name (do we still ask it to?). Both, deliberately -- they answer
+different questions. Verified by deleting the attribute: probes stayed green, the grep failed
+with the file and declaration named.
+
+#### Mutation pass (main conversation; the implementer does not verify its own fix)
+
+Ten mutations: the spec's six focus points (M1-M6), two the main conversation split out while
+running them (M2b, M9), and two a cold read added (M7, M8). An earlier version of this table
+listed five, jumped from M3 to M5 without saying why -- M4 and M6 had simply not been run,
+while the section's framing implied a complete pass -- and a later one said "six plus two" over
+a table of ten. Both were caught by cold reads counting the rows. **A record's own count of
+itself is the claim in it most likely to be wrong** -- stage 2's record says the same of its
+review rounds, and a cold read of this very sentence pointed out that calling this "the third
+such miscount" was itself a count it could not support. Do not number them; check them.
+
+| Mutation | Result |
+|---|---|
+| M1 conversion predicate `>` -> `>=` | **survived -- equivalent mutant, proven** |
+| M2 column base `+1` | killed |
+| M2b line base `+1` | killed |
+| M3 bulk-loader fill target -> `B` | killed |
+| M4 bulk loader reverts to recursive halving above 30k items | **survived -- the bound does not guard what it claimed** |
+| M5 cursor materialises the leaf per descent | **survived -- real defect in the defence** |
+| M6 cursor observes later edits | **not expressible as a mutation** |
+| M7 cursor skips each leaf's first item (added by a cold read) | killed |
+| M8 `descendSeek` copies the leaf (added by a cold read) | killed |
+| M9 reinstate `groupSizes`'s removed walk-down loop | survived, as predicted -- the loop was dead |
+
+**M6 is recorded as untestable rather than left blank.** The cursor's isolation from later
+edits is not a guard that can be reverted; it follows from `SumTreeCursor` storing a `Node`
+*value* over copy-on-write arrays, so an edit to the source rope builds new nodes and cannot
+reach the cursor's. Making it observe edits means storing a class reference -- a redesign, not
+a mutation. `CLAUDE.md` requires saying so rather than pretending coverage, and the test
+comment says it too.
+
+**A trap that caught three attempts in this milestone**: `Array(anExistingArray)` does **not**
+copy in Swift. A "materialise the leaf" mutation written that way is a no-op, passes, and looks
+like a surviving mutant. `items.map { $0 }` is a real copy. Two of those three attempts were
+the implementer's, one was the main conversation's.
+
+M1 was not written off by reasoning. An exhaustive differential -- every scalar-boundary offset
+of a multi-chunk, multi-line, mixed-scalar-width rope, all three positional metrics both ways,
+**14,409 conversions**, checked against counts recomputed by scanning raw bytes rather than
+against the rope's own summaries -- returned identical answers with the predicate both ways.
+That test stayed in the suite; exhaustive-offset coverage is worth having regardless of the
+mutant that prompted it.
+
+**M4 was the expensive one, and it falsified a claim in this record.** Reverting `build` to
+recursive halving above 30,000 items -- so 1 MB keeps the new path and 10 MB does not -- passed
+`bulkBuildThroughput` untouched. Investigating why produced a correction that reaches further
+than the bound: **the recursive-halving build this milestone replaced does not cost ~11 ms at
+1 MB.** That figure is M1.1b *stage 1*'s, and stage 2's `joinNodes` rewrite sped the old build
+up as a side effect nobody measured. Measured in the current tree, three runs each: **2.60 ms
+at 1 MB and 25.72 ms at 10 MB**, against the new build's 1.9-3.9 and 20.9-24.5.
+
+So M1.2's bulk loader is worth roughly **10-25% at 1 MB and ~17% at 10 MB**, not the ~5x this
+record's first draft implied by quoting the stale 91 MB/s as its "before". It is still the
+right structure -- one linear pass, no recursion, and the shared bottleneck M1.3's marker tree
+would otherwise inherit -- but the number was borrowed from an improvement stage 2 had already
+made. The "~110 ms at 10 MB" that both this record and the test comments cited was never
+measured at all; it was a linear extrapolation from the stale 1 MB figure.
+
+Two consequences carried into the code: the perf bounds' comments no longer claim to catch a
+revert to recursive halving, because they demonstrably do not (2.60 and 25.72 sit inside 6 ms
+and 40 ms), and the linearity argument is scoped down to *gross* superlinearity, because the
+old build was itself near-linear in practice (9.9x for 10x the input). **A bound that cannot
+distinguish the change it was written to protect is a gross-regression tripwire; saying so is
+the difference between a guard and a decoration.**
+
+M5 was real. `cursorTraversalAllocatesNothing` compared `malloc_zone_statistics`'s
+`blocks_in_use` before and after, which is a **net** gauge, and the mutation's arrays are
+transient -- freed as frames pop. It is replaced by a deterministic check: the base address of
+the array the cursor holds against the tree's own leaf array, so a copy is observable rather
+than inferred. Re-run by the main conversation: the new test fails on the mutation with the
+observed addresses alternating between two recycled buffers against the tree's distinct leaves.
+Also recorded, because it cost the implementer a round: `Array(anExistingArray)` **does not
+copy** in Swift, so the obvious form of this mutation is a no-op and proves nothing.
+
+#### `B` stays at 6, and this time with a reason rather than a deferral
+
+Stage 2 kept `B = 6` and named one event that could move it: the lazy cursor landing, because
+iteration's preference for a larger `B` was measured on `chunks()`, the operation the cursor
+would replace. It landed. Swept 4/6/8/12, three release runs each, medians:
+
+| B | iteration 1 MB | iteration 10 MB | fast-path insert 1 MB | fast-path insert 10 MB |
+|---|---|---|---|---|
+| 4 | 10.55 ns | 8.82 ns | 7.38 us | 5.25 us |
+| **6** | 3.65 ns | 5.78 ns | **4.20 us** | **5.65 us** |
+| 8 | 3.03 ns | 3.14 ns | 8.17 us | 9.83 us |
+| 12 | 3.75 ns | 2.69 ns | 8.30 us | 10.71 us |
+
+**The cursor did not move the answer, and the reason is that it removed the cost that made the
+iteration axis matter.** Iteration is now ~5x cheaper in absolute terms, so its residual
+preference for a larger `B` (0.6 ns/chunk from 6 to 8 at 1 MB) is smaller than the within-binary
+spread -- B = 6 measured 3.55/3.65/6.98 across three runs of the same binary. The fast path's
+preference for 6 is a 2x effect and it is the typing path. Read the iteration column as "inside
+the noise", not as evidence for 6.
+
+**A process note, because it is the second time this shape of error has been made in this
+project.** The first sweep pass omitted the fast-path axis and measured only iteration and the
+general path. On that evidence B = 8 or 12 looks better and the answer inverts. Stage 2's record
+already contains the same incident -- its first sweep measured only edit cost, would have picked
+B = 8, and reversed when the fast-path axis was added. Measure every axis the change touches,
+before deciding, remains the rule; knowing the rule did not prevent repeating the failure.
+
+#### Deliverable D: declined again, this time with numbers
+
+Stage 2 deferred the `Fragment.nodes` seam-merge decline to M1.2 "alongside the bulk loader,
+where chunk fill is already on the table". Measured at two scales: scattered 20,000 edits gave
+mean chunk fill 7.51, boundary-aligned 30,000 gave 8.18; at 100,000/150,000, 7.56 and 7.85.
+Boundary-aligned is **not worse** than scattered here -- the opposite direction from stage 2's
+reported ~12% degradation. Declined, with two caveats recorded rather than buried: the absolute
+regime differs from stage 2's (fill ~7-8 against its 38-52 plateau), and stage 2's exact
+offset-selection code was never committed, so this is a reconstruction whose fidelity to that
+methodology is unverified. What did not change is stage 2's own reasons: no real editing
+workload aligns every edit to an internal chunk boundary, and the fix adds an O(h) descent to
+the seam path that produced that milestone's one high-severity defect.
+
+#### Three pre-existing defects this milestone's measurements exposed
+
+None was introduced here; all three were found because M1.2 ran the perf suite, and the
+inlining guard, far more than usual. (This heading said "Two" over a list of three until a
+cold read counted them -- the same self-referential miscount stage 2's record made about its
+own review rounds. The handover now names it as a thing to check; it did not until a cold read
+observed that this sentence claimed it did.)
+
+1. **Two perf bounds were set from the wrong distribution.** `bulkBuildThroughput`'s 1 MB bound
+   (3 ms) and `scalingRatio`'s fast-path bound (10 us, from M1.1b) were both taken from the
+   benchmark run *alone*, while both are only ever executed as part of the whole suite, where
+   the earlier benchmarks leave the allocator in a different state. Run alone, 1 MB builds in
+   1.72-1.94 ms; run in-suite, 1.85-3.86 ms on identical code. **Three of six whole-suite runs
+   failed on code that meets its target**, and the fast-path bound failed two of six at 10.26 and
+   10.39 us. A gate that cries wolf on a third of runs stops being read, which is worse than no
+   gate. Both bounds are now set above the observed whole-suite spread and still far below what
+   they guard. For the fast path that is real headroom: 25 us against the 200-627 us cost of
+   the leaf-local path regressing. For the build it is **not** -- see M4 below, which found
+   after this paragraph was written that the recursive-halving build costs 2.60 ms and 25.72 ms
+   here, inside both bounds, so those two are gross-regression tripwires rather than guards on
+   this specific change. Ten consecutive whole-suite runs green afterwards.
+   **The rule, which matters more than the two numbers: a performance bound is set from the
+   distribution the assertion is actually executed in, not from the cleanest way to run it.**
+   The next benchmark added here will otherwise be given a third such bound by the same method.
+2. **A ratio assertion that fires more readily the healthier its numerator gets.**
+   `bulkBuildThroughput` divided two independently noisy measurements to check linearity, so a
+   *good* 1 MB number made the ratio more likely to breach -- one run failed it while the 1 MB
+   median was a healthy 2.3 ms. Removed. Linearity is now carried by the two absolute bounds
+   together: 40 ms at 10 MB is tighter than ten times the 6 ms bound at 1 MB, so a *grossly*
+   superlinear build cannot pass both. (10 MB was raised from 30 ms to 40 ms after this
+   paragraph was written, for the same calibration reason as the 1 MB bound; and M4 below
+   narrows what this argument is entitled to claim, because the build being replaced was itself
+   near-linear.) Asserting absolutely at both sizes rather than as a ratio is already this
+   file's stated rule; the ratio was a lapse from it.
+3. **`dev/check-inlining.sh`'s body-length counter mis-attributed.** Its awk set `where` on the
+   hot and cold probe headers and never reset it, so anything appended after the cold probe was
+   silently counted into the cold body -- adding the warm probe took cold's count from 12 to 24
+   and the script complained about the *cold* probe. Rewritten to classify each header and fail
+   loudly on an unrecognised one.
+
+#### Declined, with the reason (five cold-read rounds; the fifth found nothing)
+
+Rounds: three parallel reviewers on the first batch (14 findings), then 2, 2, 2 and a decline.
+Everything below was reported and deliberately not acted on. `CLAUDE.md`'s rule is to fix an
+incorrect *fact* and record a disagreement about *wording*; each of these is the second kind.
+
+- **Tests hard-code `6` where `branchingFactor` is in scope** (`bulkLoaderFillTarget`,
+  `cursorTraversalSharesLeafStorage`, and the `[0, 1, 5, 6, 7, 12, 13, 50, 6000]` fixture).
+  A DRY violation, but each site carries a comment saying `B = 6`, and the reviewer's own
+  analysis is that a changed `B` makes them fail loudly rather than pass silently.
+- **4.2's original sentence ("the containing type becomes `public`") was not rewritten in
+  place**, only superseded by the amendment below it. That matches this file's convention of
+  appending corrections rather than overwriting history, and the reviewer said so while
+  raising it.
+- **`SumTreeCursor.root` carries `@usableFromInline` without being referenced by any
+  currently-`@inlinable` member** -- harmless over-promotion, consistent with the type's other
+  stored properties. The reviewer rated this "not a bug" and flagged low confidence that it
+  was even unintentional.
+- **The same measurement is quoted at two precisions**, `1.85-3.86 ms` and the rounded
+  `1.9-3.9 ms`. Both are true. Observed by the main conversation's own numeric sweep before
+  round 5 and left alone: rounding is not an incorrect fact, and this milestone's rounds 3-5
+  are a demonstration of what treating wording as fact costs.
+
+#### What the main conversation got wrong
+
+- **Three times, a `grep`-filtered pipeline was used to judge whether tests passed, and three
+  times it hid the answer.** Once it filtered out pass/fail and kept only numbers, so a run
+  whose assertion breached its bound was reported as a measurement. Once a build failure
+  produced no matching line at all and eight "verification runs" that never compiled were
+  reported as running. Once it captured only one benchmark's lines and missed a second failing
+  assertion entirely. All three share a root: **treating "no failure text found" as evidence of
+  success.** Count passes positively (`grep -c` for the success line, compare with the number of
+  runs) -- absence of a match is not a green.
+- An earlier `swift test ... | tail -40` made `$?` the exit code of `tail`, marking a killed
+  mutation as survived.
+- 4.5's complexity table and M1.6 both exist because this spec's reconnaissance found M1's
+  definition of done pointing at a table that was never written, and a criterion (the 2 GB
+  read-only open) that belonged to no sub-milestone. Both are now in 4.5 and section 8.
+
 ## Icon, 2026-09-07 (out of milestone order, at the owner's request)
 
 **The mark.** A lowercase lambda -- Emacs Lisp -- inside Lisp parentheses, its right leg
@@ -2742,50 +3057,46 @@ observations and not a rule.
 
 ---
 
-## Handover: how to resume, updated 2026-09-08 (stage 2)
+## Handover: how to resume, updated 2026-09-09 (M1.2)
 
 **Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the
 whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
-- **State**: M0, M1.1 and **both stages of M1.1b** are done, each with a record in section 11.
-  The gate is green (`Test run with **97** tests in 13 suites passed`, re-run 2026-09-09).
-  This line said 96 until 2026-09-09: the stage 2 record's "87 tests -> 96" was true when it
-  was written, and the *next* commit, `1010f56`, added `generalPathInsertCost` without coming
-  back to update the handover. The working tree is clean.
-  A single-scalar insert into 1 MB costs **2.6 us** on the fast path and **12.8 us** through the
-  general path, the latter down from 96.8 us. `B` was re-swept on the new implementation and
-  **kept at 6**; the table and the reasoning are in the stage 2 record, so do not redo it --
-  except when the lazy cursor lands, which is the one event that could move the answer.
-- **Next work item**: **M1.2** -- byte/char/UTF-16/line conversions, plus the two things stage 2
-  measured and left for it: a **bottom-up bulk loader** (`Rope(String)` still runs at ~91 MB/s
-  because `SumTree.build` halves recursively through `concat`) and a **lazy cursor**
-  (`SumTree.items()`/`Rope.chunks()` flatten the whole tree into an array; that is the only
-  traversal primitive there is, and stage 2's iteration benchmark measures it at 6.4 ns/chunk).
-  Then M1.3 markers, M1.4 interval tree, M1.5 undo.
-- **Three things stage 2 deferred on purpose, each with its measurement in the record** -- do not
-  rediscover them as new: the seam merge declines when the boundary chunk is buried in a
-  `Fragment.nodes` group (bounded, ~12% fill cost on a boundary-aligned pattern, better than the
-  old code on a scattered one; fix direction recorded); the join-point pair
-  `combineUnderflowedSiblings` creates is still unchecked, and fixing it means giving `Summable`
-  an item-merge hook, which wants M1.4's second `Item` type to vote; and the two scalar-boundary
-  `precondition`s in `generalPathReplace` have **no regression test** -- deleting either leaves
-  all 96 tests green, because every randomised test draws offsets from `scalarBoundaries`.
-  Asserting a trap needs an out-of-process crash harness this project does not have; the repro in
-  the record is its first case if one is ever built.
+- **State**: M0, M1.1, both stages of M1.1b, and **M1.2** are done, each with a record in
+  section 11. The gate is green (`Test run with 123 tests in 15 suites passed`) and the perf
+  suite is green ten runs out of ten. Working tree clean.
+- **Next work item**: **M1.3**, the marker tree (4.5: an order-statistics balanced tree with
+  lazily propagated offsets, persistent like the rope; M1's definition of done wants
+  O(log n) per edit at one million markers). Then M1.4 interval tree, M1.5 undo, **M1.6** the
+  line-indexed mmap view for huge read-only files -- M1.6 is new, assigned in M1.2 because
+  M1's definition of done required it and no sub-milestone owned it.
+- **Do not redo these.** `B` was re-swept a second time on the landed cursor and **kept at 6**;
+  stage 2's "re-run it when the cursor lands" is now discharged, and the table is in the M1.2
+  record. The `Fragment.nodes` seam-merge decline was measured again and declined again, with
+  its caveats recorded. The `@usableFromInline` promotion of `SumTreeCursor`/`Node`/`Summary`/
+  `Summable` is applied, measured and guarded -- **do not extend it, and do not let it rot:**
+  `dev/check-inlining.sh` greps those declarations by name, and `iterationCost`'s 15 ns/chunk
+  ceiling is what catches a silent de-promotion.
+- **What M1.3 inherits.** `Chunk` is a plain `package struct` conforming to a
+  `@usableFromInline` protocol and it compiles, so a marker `Item` needs only `package` plus a
+  `Summable` conformance -- no further visibility changes and no per-`Item` wrapper. M1.4's
+  overlay `Item` is the second client that gets a vote on the `Summable` item-merge hook the
+  unchecked `combineUnderflowedSiblings` join point still wants (stage 2 deferred it there by
+  name; M1.2 had no second client either and left it alone).
+- **Check every count a record makes about itself** -- table rows against the sentence
+  introducing them, list items against the heading, review rounds against what happened. This
+  file has got one wrong in three consecutive milestone records, and every time a cold read
+  found it rather than the author. Cheapest class of defect to find, likeliest to reach a
+  commit.
+- **Two measurement rules this milestone paid for**, both in the M1.2 record with the incidents:
+  a performance bound is set from the distribution the assertion is actually executed in, not
+  from the cleanest way to run it (two bounds here were set from isolated runs and failed a
+  third of whole-suite runs on healthy code); and **count passes positively** -- "no failure
+  text in the output" is not evidence of success, and was wrong three times in one milestone,
+  once hiding eight runs that never compiled.
 - **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`.
-  Do not skip the trailing re-review. Stage 2 ran five rounds on batches of 802, 89, 19, 23 and
-  316 **added lines**, and **round 1 found a high-severity defect that the whole green gate could not
-  see**: the rewrite had dropped a scalar-boundary `precondition`, turning a loud programmer-error
-  trap into silent corruption of the user's text that `checkTreeInvariants()` structurally cannot
-  detect. Rounds 2 and 4 each found something real on batches under 100 lines, and round 5 -- the
-  one the record itself was owed -- found three false claims *in this record*, one of which was its
-  own count of how many rounds had run. Read a returned
-  finding as evidence about the **task spec** too -- stage 1 had two such, and stage 2 had three,
-  listed in its record.
-- `dev/mutate.py` is the harness for step 5. Read its header before trusting a survivor. Stage 2
-  ran its mutations by hand instead (file backup, targeted edit, `touch`, restore, `diff` against
-  the backup to prove the restore was byte-exact); the table of what survived and why is in the
-  record, and two survivors were real coverage gaps that produced two new tests.
+  The mutation pass and the gate belong to the main conversation; the implementer never
+  verifies its own fix. Do not skip the trailing re-review.
 
 ## Handover: state after M0, 2026-09-06
 
