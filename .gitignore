@@ -5,3 +5,4 @@
 DerivedData/
 release-checks/*.plist
 .DS_Store
+.claude/

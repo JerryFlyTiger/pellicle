@@ -1,17 +1,22 @@
 /// Probes for `dev/check-inlining.sh`, the standing regression test for this project's
 /// cross-module optimisation convention (PLAN.md 4.2).
 ///
-/// Two shapes, deliberately paired so the check is falsifiable in both directions from a
+/// Three shapes, deliberately paired so the check is falsifiable in both directions from a
 /// single stock `swift build -c release`:
 ///
-/// - `LispHotProbe` is the *promoted* shape: a `public` type whose hot member is
+/// - `LispHotProbe` is the `public` promoted shape: a `public` type whose hot member is
 ///   `@inlinable` and whose storage is `@usableFromInline`. A caller in another module
 ///   must end up with no reference to it at all.
+/// - `LispWarmProbe` is the `@usableFromInline package` shape this project actually ships
+///   for `SumTreeCursor` in `Sources/Text` — never `public`. See
+///   `Sources/Text/InliningProbe.swift`'s `TextWarmProbe` for the full rationale; this is
+///   its `Lisp`-module twin so the check exercises both directions the caller in `Editor`
+///   crosses.
 /// - `LispColdProbe` is the default shape: a `package` type with a plain `package`
 ///   member. A caller in another module must still emit a real call to it.
 ///
-/// The second half is what gives the check teeth: without it, a build in which nothing
-/// at all was emitted would pass.
+/// The last is what gives the check teeth: without it, a build in which nothing at all was
+/// emitted would pass.
 ///
 /// The body length is load-bearing and must not be "simplified". Measured on this machine
 /// (Swift 6.3.3), the optimiser inlines a cross-module call of a body of four statements
@@ -29,6 +34,31 @@ public struct LispHotProbe {
     public init(seed: UInt64 = 31) { self.seed = seed }
 
     @inlinable public func packedByteLength(_ x: UInt64) -> UInt64 {
+        var v = x &* seed
+        v = (v &* 2_654_435_761) ^ (v >> 1) &+ 0
+        v = (v &* 2_654_435_762) ^ (v >> 2) &+ 1
+        v = (v &* 2_654_435_763) ^ (v >> 3) &+ 2
+        v = (v &* 2_654_435_764) ^ (v >> 4) &+ 3
+        v = (v &* 2_654_435_765) ^ (v >> 5) &+ 4
+        v = (v &* 2_654_435_766) ^ (v >> 6) &+ 5
+        v = (v &* 2_654_435_767) ^ (v >> 7) &+ 6
+        v = (v &* 2_654_435_768) ^ (v >> 8) &+ 7
+        v = (v &* 2_654_435_769) ^ (v >> 9) &+ 8
+        v = (v &* 2_654_435_770) ^ (v >> 10) &+ 9
+        v = (v &* 2_654_435_771) ^ (v >> 11) &+ 10
+        v = (v &* 2_654_435_772) ^ (v >> 12) &+ 11
+        return v
+    }
+}
+
+@usableFromInline package struct LispWarmProbe {
+    @usableFromInline let seed: UInt64
+
+    package init(seed: UInt64 = 31) { self.seed = seed }
+
+    /// Byte-for-byte the same computation as `LispHotProbe.packedByteLength`, so the three
+    /// shapes differ only in access level and annotation, never in what they compute.
+    @inlinable package func packedByteLength(_ x: UInt64) -> UInt64 {
         var v = x &* seed
         v = (v &* 2_654_435_761) ^ (v >> 1) &+ 0
         v = (v &* 2_654_435_762) ^ (v >> 2) &+ 1

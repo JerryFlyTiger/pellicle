@@ -306,6 +306,53 @@ struct RopeTests {
         return result
     }
 
+    /// M1.2: an independent oracle for `Rope.convert(offset:from: .utf8, to:)`, computed
+    /// directly over `bytes[0..<byteOffset]` — deliberately not sharing any code with
+    /// `Chunk.scanSummary`/`TextMetric.chunkLocalScan`, so the randomised model test in
+    /// `randomizedModel` is checking the rope's answer against an independent computation,
+    /// not against itself (`dev/specs/m1.2.md` section 3).
+    fileprivate static func modelMetricCount(
+        _ bytes: [UInt8], upTo byteOffset: Int, metric: TextMetric
+    )
+        -> Int
+    {
+        if metric == .utf8 { return byteOffset }
+        var scalars = 0
+        var utf16 = 0
+        var lines = 0
+        var i = 0
+        while i < byteOffset {
+            let b = bytes[i]
+            if b == 0x0A { lines += 1 }
+            if b & 0b1100_0000 != 0b1000_0000 {
+                scalars += 1
+                utf16 += (b & 0b1111_1000 == 0b1111_0000) ? 2 : 1
+            }
+            i += 1
+        }
+        switch metric {
+        case .utf8: return byteOffset
+        case .utf16: return utf16
+        case .scalars: return scalars
+        case .lines: return lines
+        }
+    }
+
+    /// M1.2: an independent oracle for `Rope.byteOffsetOfLineStart`, computed by scanning
+    /// for the `line`-th `"\n"` directly — same independence rationale as
+    /// `modelMetricCount` above.
+    fileprivate static func modelLineStart(_ bytes: [UInt8], line: Int) -> Int {
+        if line == 0 { return 0 }
+        var lines = 0
+        for i in 0..<bytes.count {
+            if bytes[i] == 0x0A {
+                lines += 1
+                if lines == line { return i + 1 }
+            }
+        }
+        preconditionFailure("modelLineStart: line \(line) out of range for this buffer")
+    }
+
     /// Scalar boundaries in `bytes`: every index where a lead byte starts (plus 0 and the
     /// end), used by the randomised model test to draw only valid edit/slice offsets.
     fileprivate static func scalarBoundaries(_ bytes: [UInt8]) -> [Int] {
@@ -424,6 +471,14 @@ struct RopeTests {
         pasteChance: Int = 0
     ) -> RandomizedModelStats {
         var rng = SplitMix64(seed: seed)
+        // A separate stream, not draws from `rng` above: this loop's op-selection sequence
+        // (and therefore the exact watermark numbers the doc comment above and the
+        // assertions below were tuned against) is a function of every `rng.next()` call in
+        // order. Drawing from the same stream for the M1.2 conversion checks added below
+        // would shift every later op's choice and silently retune the whole property —
+        // caught exactly this way while adding those checks: it moved `maxModelSize` from
+        // 32768 to 43105 and broke the oscillation assertion outright.
+        var convRng = SplitMix64(seed: seed ^ 0xC0FF_EE00_C0FF_EE00)
         var model: [UInt8] = Array(String(repeating: "m", count: initialSize).utf8)
         var rope = Rope(String(repeating: "m", count: initialSize))
         let pool: [String] = ["a", "b", "\n", "é", "字", "🙂", "xy", "line\n"]
@@ -509,6 +564,42 @@ struct RopeTests {
             #expect(
                 rope.summary == Self.modelSummary(model),
                 "\(label), seed \(seed), op \(opIndex): summary mismatch")
+
+            // M1.2: after every operation, check `convert` against an independently
+            // computed answer over the model array (count non-continuation bytes, count
+            // UTF-16 units, count `\n`) — not against the rope's own summaries, which would
+            // only prove the summaries agree with themselves (`dev/specs/m1.2.md` section
+            // 3, "Differential property against the naive model"). One sampled boundary
+            // offset per operation, not every boundary: this loop already runs up to 2,000
+            // times per band, and the hand-written fixtures in
+            // `conversionAndCursorTests.swift` cover the edge cases (chunk boundaries,
+            // 4-byte scalars, etc.) directly.
+            // Recomputed post-op, not reusing `boundaries` above: that array was computed
+            // from `model` *before* this iteration's op ran, and the op may have shrunk
+            // `model` since (a delete/replace), which would make a stale boundary an
+            // out-of-range index into the now-shorter array.
+            let postOpBoundaries = Self.scalarBoundaries(model)
+            if postOpBoundaries.count > 0 {
+                let sampleOffset =
+                    postOpBoundaries[Int(convRng.next() % UInt64(postOpBoundaries.count))]
+                for metric in [TextMetric.utf16, .scalars, .lines] {
+                    let expected = Self.modelMetricCount(model, upTo: sampleOffset, metric: metric)
+                    let actual = rope.convert(offset: sampleOffset, from: .utf8, to: metric)
+                    let message =
+                        "\(label), seed \(seed), op \(opIndex): convert utf8->\(metric) at "
+                        + "\(sampleOffset) expected \(expected), got \(actual)"
+                    #expect(actual == expected, "\(message)")
+                }
+                let modelLineCount =
+                    Self.modelMetricCount(model, upTo: model.count, metric: .lines) + 1
+                let sampleLine = Int(convRng.next() % UInt64(modelLineCount))
+                let expectedStart = Self.modelLineStart(model, line: sampleLine)
+                let actualStart = rope.byteOffsetOfLineStart(sampleLine)
+                let lineMessage =
+                    "\(label), seed \(seed), op \(opIndex): byteOffsetOfLineStart(\(sampleLine)) "
+                    + "expected \(expectedStart), got \(actualStart)"
+                #expect(actualStart == expectedStart, "\(lineMessage)")
+            }
 
             // Every operation, not on a cadence: a malformed node produced by `rewrap`'s
             // overflow branch is self-healing (a later `concat` re-folds and repairs it in

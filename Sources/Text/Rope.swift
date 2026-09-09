@@ -18,12 +18,175 @@
 /// `ropeTests.swift`'s fragmentation guard checks for.
 ///
 /// Known gaps, deliberately out of scope for this sub-milestone:
-/// - No character-, UTF-16- or line-based conversion API. `TextSummary` already carries
-///   the counts such a conversion would need; turning a byte offset into a line/column or
-///   a UTF-16 offset (and back) is M1.2's job.
 /// - No marker tree (M1.3) and no snapshot type distinct from `Rope` itself — `Rope` is
 ///   already `Sendable` with value semantics, so a snapshot in this sub-milestone is just
 ///   a copy of the struct.
+///
+/// **M1.2 added** metric conversions (`TextMetric`, `convert`, `lineAndByteColumn`,
+/// `byteOffset(line:byteColumn:)`, `byteOffsetOfLineStart`, `lineCount` — see below), a
+/// bottom-up bulk loader (`SumTree.swift`), and a lazy cursor (`SumTreeCursor.swift`,
+/// re-expressing `chunks()`/`bytes()`/`toString()`).
+///
+/// **Conversion offsets inherit this file's own scalar-boundary contract** (`isScalarBoundary`
+/// above): every offset argument to `convert`/`lineAndByteColumn`/`byteOffset` must land on a
+/// scalar boundary in whichever metric it is expressed in, and a non-boundary offset is a
+/// programmer error that `precondition`/`preconditionFailure`s inside the chunk-local scan
+/// rather than silently truncating. **Nothing regression-tests that trap**, for the same
+/// reason the two in `generalPathReplace` are not covered (see this file's header there, and
+/// `PLAN.md:1969-1974`): every randomised and property test in this file and
+/// `conversionAndCursorTests.swift` draws its offsets from a metric's own valid boundary set,
+/// and asserting the trap itself would need an out-of-process crash harness this project does
+/// not have.
+
+/// The four coordinate systems M1.2's conversions move between (`dev/specs/m1.2.md`
+/// deliverable A). `@frozen`, not a protocol: this is a hot path (`PLAN.md:340-351` names
+/// the snapshot cursor as a future inlining-promotion candidate, and this metric is the
+/// type it is parameterised over), and a protocol boundary was measured non-devirtualised
+/// in every configuration M0 tried (decision log item 4.16). `TextMetric` is a promotion
+/// candidate whose benchmark has not asked for it yet — see `count(in:)` below for why it
+/// carries no `@inlinable` today. Eight hand-written `utf8ToUTF16`/`utf16ToScalars`/...
+/// functions were rejected for the same reason stage 2 gave when it deleted
+/// `buildFromNodes`: one implementation, not `4 × 3` of them that must all agree.
+@frozen
+package enum TextMetric: Sendable, Equatable {
+    case utf8, utf16, scalars, lines
+}
+
+extension TextMetric {
+    /// Reads this metric's running count out of a `TextSummary`.
+    ///
+    /// `TextMetric` is a promotion candidate whose benchmark has not asked for it yet: the
+    /// `@inlinable` this carried was removed because a plain-`package` `@inlinable` is
+    /// unchecked by the compiler and reads as "promoted" to anyone skimming, when it does
+    /// nothing across a module boundary (`dev/specs/m1.2-promotion-and-guards.md` task 1).
+    package func count(in summary: TextSummary) -> Int {
+        switch self {
+        case .utf8: return summary.utf8
+        case .utf16: return summary.utf16
+        case .scalars: return summary.scalars
+        case .lines: return summary.lines
+        }
+    }
+
+    fileprivate static func current(
+        _ metric: TextMetric, utf8: Int, utf16: Int, scalars: Int, lines: Int
+    ) -> Int {
+        switch metric {
+        case .utf8: return utf8
+        case .utf16: return utf16
+        case .scalars: return scalars
+        case .lines: return lines
+        }
+    }
+
+    /// The chunk-local half of `Rope.convert` for `from` in `{utf8, utf16, scalars}` (see
+    /// `Rope.convert`'s doc comment for why `.lines` is handled separately). Scans `chunk`
+    /// scalar by scalar — never stopping mid-scalar, so a multi-byte scalar's UTF-16 width
+    /// and scalar-count contribution are never read half-formed — tracking all four running
+    /// counts in lockstep (mirroring `Chunk.scanSummary`'s own byte walk), until `from`'s
+    /// running count equals `target`; returns `to`'s running count at that same point.
+    /// `from == .utf8` skips the scan: a byte count already *is* the byte position, so only
+    /// `to`'s count over that byte range needs computing (`chunkLocalCount` below).
+    static func chunkLocalScan(_ chunk: Chunk, target: Int, from: TextMetric, to: TextMetric)
+        -> Int
+    {
+        if from == .utf8 {
+            return chunkLocalCount(chunk, upToByte: target, of: to)
+        }
+        if target == 0 { return 0 }
+        var utf8 = 0
+        var utf16 = 0
+        var scalars = 0
+        var lines = 0
+        var p = 0
+        let n = Int(chunk.count)
+        while p < n {
+            let lead = chunk[p]
+            let scalarLen = Rope.utf8ScalarByteLength(lead)
+            utf8 += scalarLen
+            scalars += 1
+            utf16 += scalarLen == 4 ? 2 : 1
+            if scalarLen == 1 && lead == 0x0A { lines += 1 }
+            p += scalarLen
+            if TextMetric.current(from, utf8: utf8, utf16: utf16, scalars: scalars, lines: lines)
+                == target
+            {
+                return TextMetric.current(
+                    to, utf8: utf8, utf16: utf16, scalars: scalars, lines: lines)
+            }
+        }
+        preconditionFailure(
+            "TextMetric.chunkLocalScan: target \(target) is not a valid \(from) boundary in this chunk"
+        )
+    }
+
+    /// The `.lines`-only local search `Rope.convert`/`byteOffsetOfLineStart` use: the first
+    /// local byte position where the chunk's own running newline count *exceeds* `target`,
+    /// matching `SumTree.find`'s `>` convention one level down. `.lines` is not positional
+    /// (see `Rope.convert`'s doc comment on why it is handled separately from the other
+    /// three): "leftmost local position whose newline count equals `target`" is not what a
+    /// line start means (it would answer with the position *before* the line even starts,
+    /// wherever the count last held that value); "leftmost position after the count's last
+    /// increase" is.
+    static func chunkLocalLineStart(_ chunk: Chunk, target: Int, to: TextMetric) -> Int {
+        var utf8 = 0
+        var utf16 = 0
+        var scalars = 0
+        var lines = 0
+        var p = 0
+        let n = Int(chunk.count)
+        while p < n {
+            let lead = chunk[p]
+            let scalarLen = Rope.utf8ScalarByteLength(lead)
+            utf8 += scalarLen
+            scalars += 1
+            utf16 += scalarLen == 4 ? 2 : 1
+            if scalarLen == 1 && lead == 0x0A { lines += 1 }
+            p += scalarLen
+            if lines > target {
+                return TextMetric.current(
+                    to, utf8: utf8, utf16: utf16, scalars: scalars, lines: lines)
+            }
+        }
+        preconditionFailure(
+            "TextMetric.chunkLocalLineStart: line start \(target + 1) is not within this chunk")
+    }
+
+    /// The `from == .utf8` fast path's second half: the `to`-metric count over exactly the
+    /// first `byteCount` bytes of `chunk` (a plain forward scan, no target to stop at other
+    /// than the byte count itself — `from == .utf8` never needs the `==`/`>`-driven search
+    /// `chunkLocalScan`/`chunkLocalLineStart` do, because a byte count already names a byte
+    /// position with no ambiguity).
+    private static func chunkLocalCount(
+        _ chunk: Chunk, upToByte byteCount: Int, of metric: TextMetric
+    )
+        -> Int
+    {
+        if metric == .utf8 { return byteCount }
+        var utf16 = 0
+        var scalars = 0
+        var lines = 0
+        var p = 0
+        while p < byteCount {
+            let lead = chunk[p]
+            let scalarLen = Rope.utf8ScalarByteLength(lead)
+            scalars += 1
+            utf16 += scalarLen == 4 ? 2 : 1
+            if scalarLen == 1 && lead == 0x0A { lines += 1 }
+            p += scalarLen
+        }
+        precondition(
+            p == byteCount,
+            "TextMetric.chunkLocalCount: byte offset \(byteCount) is not a scalar boundary")
+        switch metric {
+        case .utf8: return byteCount
+        case .utf16: return utf16
+        case .scalars: return scalars
+        case .lines: return lines
+        }
+    }
+}
+
 package struct Rope: Sendable, Equatable {
     private var tree: SumTree<Chunk>
 
@@ -256,6 +419,138 @@ package struct Rope: Sendable, Equatable {
             preconditionFailure("byte offset out of range")
         }
         return (chunk, byteOffset - itemPrefix.utf8)
+    }
+
+    // MARK: - Metric conversions (M1.2)
+
+    /// A byte offset within a single `Chunk` (a lead byte, or the very end) as scalars of
+    /// its UTF-8 encoding: `0x00...0x7F` is 1 byte, `0xC2...0xDF` is 2, `0xE0...0xEF` is 3,
+    /// `0xF0...0xF4` is 4. Assumes `chunk`'s bytes are well-formed UTF-8 (`Chunk`'s own
+    /// invariant, enforced at every initializer), so no other lead-byte range is possible.
+    /// Shared by `TextMetric.chunkLocalScan`/`chunkLocalLineStart`, which both need to walk
+    /// a chunk scalar by scalar rather than byte by byte, so a multi-byte scalar's UTF-16
+    /// width and scalar count are never read from a byte in the middle of it.
+    @inlinable
+    static func utf8ScalarByteLength(_ lead: UInt8) -> Int {
+        if lead & 0b1000_0000 == 0 { return 1 }
+        if lead & 0b1110_0000 == 0b1100_0000 { return 2 }
+        if lead & 0b1111_0000 == 0b1110_0000 { return 3 }
+        return 4
+    }
+
+    /// Converts an offset expressed in `from` units to the equivalent offset in `to` units,
+    /// at O(log n) — reach the chunk containing it via `SumTree.find` (O(h), allocates
+    /// nothing — see `SumTree.swift`'s file header), then scan within that one chunk
+    /// (O(64) — see `Chunk`'s size invariant). `PLAN.md:460` promises this complexity, and
+    /// `PLAN.md:592` (LSP UTF-16 positions "converted by rope summaries, never by scanning")
+    /// depends on it: a conversion that scanned from the start of the buffer would fail this
+    /// even if its answers were right.
+    ///
+    /// **`.lines` is not like the other three.** `utf8`/`utf16`/`scalars` each advance by
+    /// exactly one unit per scalar (`utf16` by two for an astral scalar) and never revisit a
+    /// value, so a valid boundary offset in one of them names exactly one byte position —
+    /// converting between any pair of these three, or between one of them and `.lines`, is
+    /// unambiguous and handled by the general path below. `.lines` counts a *byte value*
+    /// (`"\n"`), not units consumed: every byte position within one line shares the same
+    /// `.lines` count, so "the position where `.lines`'s count equals N" is not
+    /// well-defined — what M1.2's public surface actually wants from `.lines` as a `from`
+    /// metric is "the start of line N" (`byteOffsetOfLineStart`, which this delegates to);
+    /// see that function's doc comment for the one-off shift this requires.
+    package func convert(offset: Int, from: TextMetric, to: TextMetric) -> Int {
+        if from == .lines {
+            return byteOffsetOfLineStart(offset, resultMetric: to)
+        }
+        let total = from.count(in: summary)
+        precondition(
+            offset >= 0 && offset <= total,
+            "Rope.convert: offset \(offset) out of range for \(from) (total \(total))")
+        if from == to { return offset }
+        if offset == 0 { return 0 }
+        if offset == total { return to.count(in: summary) }
+        guard let (chunk, itemPrefix) = tree.find(where: { from.count(in: $0) > offset })
+        else {
+            preconditionFailure("Rope.convert: offset \(offset) out of range for \(from)")
+        }
+        let localTarget = offset - from.count(in: itemPrefix)
+        let localResult = TextMetric.chunkLocalScan(chunk, target: localTarget, from: from, to: to)
+        return to.count(in: itemPrefix) + localResult
+    }
+
+    /// `byteOffsetOfLineStart`'s actual implementation, generalised to return the start of
+    /// `line` in any metric (not just `utf8`) so `convert(offset:from:.lines,to:)` can share
+    /// it. `line == 0` is always offset 0 in every metric, with no descent. For `line > 0`:
+    /// finds the chunk containing the boundary between line `line - 1` and line `line` (the
+    /// chunk whose own newline count first pushes the running total past `line - 1`, i.e.
+    /// `>= line`, via the same `>`-predicate `SumTree.find` uses everywhere else in this
+    /// file), then `chunkLocalLineStart` finds the exact byte within it — see that
+    /// function's doc comment for why this needs the `>` convention rather than `==`.
+    private func byteOffsetOfLineStart(_ line: Int, resultMetric: TextMetric) -> Int {
+        precondition(
+            line >= 0 && line < lineCount, "Rope.byteOffsetOfLineStart: line \(line) out of range")
+        if line == 0 { return 0 }
+        let target = line - 1
+        guard let (chunk, itemPrefix) = tree.find(where: { $0.lines > target }) else {
+            preconditionFailure("Rope.byteOffsetOfLineStart: line \(line) out of range")
+        }
+        let localTarget = target - itemPrefix.lines
+        let localResult = TextMetric.chunkLocalLineStart(
+            chunk, target: localTarget, to: resultMetric)
+        return resultMetric.count(in: itemPrefix) + localResult
+    }
+
+    /// The number of lines in the buffer: `summary.lines` (the newline count) plus one,
+    /// since the text after the last newline (possibly empty) is always itself a line.
+    package var lineCount: Int { summary.lines + 1 }
+
+    /// The 0-based line and UTF-8-byte column of `byteOffset`. **Both are 0-based** — GNU
+    /// Emacs's `line-number-at-pos`/`current-column` oracle this project's tests check
+    /// against uses 1-based lines, so a test comparing the two applies that offset itself,
+    /// visibly, rather than this function silently matching Emacs's convention (see
+    /// `conversionAndCursorTests.swift`'s oracle test). The column is in **UTF-8 bytes**,
+    /// the unit `firstLineLen`/`lastLineLen`/`maxLineLen` already use (`TextSummary.swift`)
+    /// — a caller wanting a UTF-16 (LSP) or scalar (Emacs `current-column`) column composes
+    /// this with `convert`; M1.2 does not add a second column unit (see `dev/specs/m1.2.md`
+    /// section 1.A).
+    package func lineAndByteColumn(atByteOffset byteOffset: Int) -> (line: Int, byteColumn: Int) {
+        precondition(byteOffset >= 0 && byteOffset <= utf8Count)
+        let line = convert(offset: byteOffset, from: .utf8, to: .lines)
+        let lineStart = byteOffsetOfLineStart(line)
+        return (line, byteOffset - lineStart)
+    }
+
+    /// The byte offset of the first byte of `line` (0-based) — `0` for `line == 0`, and
+    /// otherwise the byte right after line `line - 1`'s trailing `"\n"`.
+    package func byteOffsetOfLineStart(_ line: Int) -> Int {
+        byteOffsetOfLineStart(line, resultMetric: .utf8)
+    }
+
+    /// The byte offset of `(line, byteColumn)` — the inverse composition
+    /// `lineAndByteColumn` decomposes into. Inherits this file's scalar-boundary contract
+    /// (see the file header): the result must land on a scalar boundary, or this traps.
+    ///
+    /// **`byteColumn` may equal the line's own length, but no more.** A line's byte span
+    /// runs from its start up to (but not including) the `"\n"` that ends it, or up to
+    /// `utf8Count` for the last line (`TextSummary`'s `firstLineLen`/`lastLineLen` count the
+    /// same way: bytes *before* the terminating `"\n"`). `byteColumn == length` therefore
+    /// names the position of that `"\n"` byte itself (or the buffer's end, for the last
+    /// line) — still `lineAndByteColumn`'s inverse at that point, since converting that same
+    /// offset back reports it as column `length` of this same line, the `"\n"` not yet
+    /// having incremented the line count. `byteColumn > length` would name a position at or
+    /// past the start of the *next* line, which is not this line's inverse to give back, so
+    /// it traps rather than silently answering with a different line's position.
+    package func byteOffset(line: Int, byteColumn: Int) -> Int {
+        precondition(byteColumn >= 0)
+        let lineStart = byteOffsetOfLineStart(line)
+        let lineEnd = line + 1 < lineCount ? byteOffsetOfLineStart(line + 1) - 1 : utf8Count
+        let result = lineStart + byteColumn
+        precondition(
+            result <= lineEnd,
+            "Rope.byteOffset: byteColumn \(byteColumn) is past the end of line \(line) "
+                + "(\(lineEnd - lineStart) bytes)")
+        precondition(
+            isScalarBoundary(result),
+            "Rope.byteOffset: line \(line), byteColumn \(byteColumn) is not a scalar boundary")
+        return result
     }
 
     // MARK: - Splitting at an arbitrary byte offset
@@ -749,14 +1044,18 @@ package struct Rope: Sendable, Equatable {
 
     // MARK: - Extraction
 
-    package func chunks() -> some Sequence<Chunk> {
-        tree.items()
+    /// A lazy, allocation-free traversal of this rope's chunks, in order (M1.2 deliverable
+    /// C, `SumTreeCursor`). Before this round, `chunks()` returned `tree.items()`, which
+    /// flattens the whole tree into an `[Chunk]` before the caller ever sees the first one;
+    /// `bytes()`/`toString()` below are built on the same cursor for the same reason.
+    package func chunks() -> SumTreeCursor<Chunk> {
+        tree.makeCursor()
     }
 
     package func bytes() -> some Sequence<UInt8> {
         var result: [UInt8] = []
         result.reserveCapacity(utf8Count)
-        for chunk in tree.items() {
+        for chunk in tree.makeCursor() {
             chunk.withUnsafeBytes { result.append(contentsOf: $0) }
         }
         return result
@@ -765,10 +1064,34 @@ package struct Rope: Sendable, Equatable {
     package func toString() -> String {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(utf8Count)
-        for chunk in tree.items() {
+        for chunk in tree.makeCursor() {
             chunk.withUnsafeBytes { bytes.append(contentsOf: $0) }
         }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// **Test-only hook**, not `package`/`public`: an independent reference for a test to
+    /// check the cursor against. `SumTree.items()` walks the tree with its own recursive
+    /// `collect`, never touching `SumTreeCursor` — unlike `chunks()`/`bytes()` above, which
+    /// (since M1.2) are both re-expressed on the cursor and so cannot serve as an
+    /// independent oracle for it (a cursor traversal bug that skips or duplicates an item
+    /// would corrupt all three identically, and a test comparing them would see agreement
+    /// with nothing actually checked). `internal`, not `private`: reached only via
+    /// `@testable import Text` from `conversionAndCursorTests.swift`'s
+    /// `cursorAgreesWithItems`.
+    func itemsViaTree() -> [Chunk] {
+        tree.items()
+    }
+
+    /// A cursor over this rope's chunks, seekable by byte offset or by any `TextMetric` —
+    /// exposed for a caller that wants to stream from an arbitrary starting point, or
+    /// convert many offsets in increasing order without paying `convert`'s O(h) descent
+    /// from the root each time (see `SumTreeCursor.seek`'s doc comment for the one
+    /// optimisation this does not yet do). `convert` itself does not route through this —
+    /// it is a single, stateless conversion, and `SumTree.find` is already O(h) and
+    /// allocation-free on its own.
+    package func makeCursor() -> SumTreeCursor<Chunk> {
+        tree.makeCursor()
     }
 
     // MARK: - Equatable
@@ -776,5 +1099,39 @@ package struct Rope: Sendable, Equatable {
     package static func == (lhs: Rope, rhs: Rope) -> Bool {
         guard lhs.summary == rhs.summary else { return false }
         return Array(lhs.bytes()) == Array(rhs.bytes())
+    }
+}
+
+extension SumTreeCursor where Item == Chunk {
+    /// Repositions a `Rope` cursor at the chunk containing `offset` in `metric`'s units, via
+    /// `SumTreeCursor.seek` — the same descent `Rope.convert` does, kept resumable (see that
+    /// method's doc comment for the from-root narrowing this inherits).
+    ///
+    /// **`.lines` needs the same off-by-one shift `Rope.convert`/`byteOffsetOfLineStart`
+    /// apply and this used not to**: `.lines` counts a byte *value* (`"\n"`), not units
+    /// consumed (see `Rope.convert`'s doc comment), so "the chunk where the running line
+    /// count first exceeds `offset`" is the chunk holding line `offset`'s *own* content, one
+    /// line short of "the start of line `offset`" — `convert`'s `.lines` special case
+    /// searches for `offset - 1`, not `offset`, for exactly this reason. An earlier version
+    /// of this function used `metric.count(in: $0) > offset` unconditionally for every
+    /// metric, including `.lines`, and landed one line past `offset`; fixed here by applying
+    /// the same shift `byteOffsetOfLineStart` does, so `seek(to:metric: .lines)` and
+    /// `convert(offset:from: .utf8,to: .lines)`'s inverse agree. `line == 0` is a further
+    /// special case, matching `byteOffsetOfLineStart(0)`'s own no-descent shortcut: shifting
+    /// naively would search for `.lines`'s count exceeding `-1`, which is true already of
+    /// `.identity` and would trip `seek`'s own precondition before ever descending. Line 0
+    /// always starts at byte 0, in the first chunk, the same chunk any other metric's
+    /// `offset == 0` seeks to — so this reuses that same "first chunk" predicate rather than
+    /// a `.lines`-specific one.
+    package mutating func seek(to offset: Int, metric: TextMetric) {
+        if metric == .lines {
+            if offset == 0 {
+                seek(where: { $0.utf8 > 0 })
+            } else {
+                seek(where: { TextMetric.lines.count(in: $0) > offset - 1 })
+            }
+        } else {
+            seek(where: { metric.count(in: $0) > offset })
+        }
     }
 }

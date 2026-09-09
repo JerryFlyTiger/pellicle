@@ -41,9 +41,16 @@
 /// now carries this same distinction). `find` is `cut` without the two halves: genuinely
 /// O(h), because it descends without ever allocating, copying or rebuilding any part of the
 /// tree (see `findNode`'s doc comment) — cheaper even than `split`/`cut`'s O(h), which still
-/// builds O(h) worth of new nodes. Bulk build from a sequence of items is
-/// implemented on top of `concat` by recursive halving, which is simpler than a bespoke
-/// bulk-loader and inherits `concat`'s correctness.
+/// builds O(h) worth of new nodes. Bulk build from a sequence of items (M1.2) is a
+/// **bottom-up, level-by-level pack**: items are packed into leaves at a chosen fill, then
+/// the previous level's nodes are packed into interiors, repeated until one root remains —
+/// see `SumTree.build`. This replaced the original recursive-halving-plus-`concat` build
+/// (kept as `buildViaRecursiveHalvingForTesting` for the differential test comparing the
+/// two): the old build cost O(n log n) total `concat` work (each of the O(log n) levels of
+/// the halving recursion re-joining through `concat`'s O(h) splice), where the new one
+/// costs O(n) — every item and every intermediate node is visited exactly once, with no
+/// `concat` call at all. Measured at 1 MB: ~11 ms with the old build
+/// (`PLAN.md:1719-1723`, ~91 MB/s); the implementer's report carries the new number.
 ///
 /// **`concat`, `split` and `cut` are all O(h) in the tree's height** (M1.1b stage 2; an
 /// earlier version of this comment measured `split`/`cut` at O(B · h²), before this round).
@@ -72,13 +79,13 @@
 /// A monoid summarising a run of items. Identity is a two-sided identity for `+`
 /// (`identity + x == x + identity == x`), and `+` must be associative — that is what makes
 /// a cached summary trustworthy regardless of how the tree balances.
-package protocol Summary: Sendable, Equatable {
+@usableFromInline package protocol Summary: Sendable, Equatable {
     static var identity: Self { get }
     static func + (lhs: Self, rhs: Self) -> Self
 }
 
 /// Something a `SumTree` can hold at its leaves: anything with a `Summary`.
-package protocol Summable: Sendable {
+@usableFromInline package protocol Summable: Sendable {
     associatedtype Item_Summary: Summary
     var summary: Item_Summary { get }
 }
@@ -86,7 +93,7 @@ package protocol Summable: Sendable {
 /// A node of the tree. `leaf` holds items directly; `interior` holds child nodes, plus the
 /// node's own height (0 for a leaf, one more than its children's for an interior node) so
 /// `concat` and `split` can compare heights without walking down to find them.
-package enum Node<Item: Summable>: Sendable {
+@usableFromInline package enum Node<Item: Summable>: Sendable {
     case leaf([Item], Item.Item_Summary)
     case interior([Node<Item>], Item.Item_Summary, UInt8)
 }
@@ -602,20 +609,102 @@ package struct SumTree<Item: Summable>: Sendable {
         self.root = .leaf([], Item.Item_Summary.identity)
     }
 
-    /// Bulk build from a sequence of items, by recursively halving and joining with
-    /// `concat` — simpler than a bespoke bulk loader, and correct for free because `concat`
-    /// is correct.
+    /// Bulk build from a sequence of items (M1.2): bottom-up, level by level — see the file
+    /// header and `build`'s own doc comment.
     package init(items: [Item]) {
         self.root = SumTree.build(Array(items))
     }
 
+    /// Packs `n` entries (leaf items, or same-height nodes at an interior level) into the
+    /// **fewest groups that keep every group in `B...2B`** — the fill target this loader
+    /// commits to is "as full as the invariant allows", not `B` (a loader that only ever
+    /// filled to `B` would still pass every invariant and equality check and just build a
+    /// taller, sparser tree — mutation focus, see `dev/specs/m1.2.md` section 5). `n <= 2B`
+    /// is one group (however small — non-root looseness is legal, and `build` only ever
+    /// calls this for a level that might end up being the whole tree). Above that, the
+    /// group count is `ceil(n / 2B)` (as few groups as fit within the `2B` ceiling) with no
+    /// further adjustment needed: for `n > 2B`, `count0 = ceil(n / 2B)` always already
+    /// satisfies `n / count0 >= B` — an earlier version of this function walked `count`
+    /// down by one at a time to enforce that, on the belief that `count0` could still leave
+    /// the last group under `B`; a cold read proved that belief false (verified both
+    /// algebraically and by exhaustive check of every `n` up to 200,000 against `B = 6`: the
+    /// loop's condition was never once true, and disabling it outright leaves every test
+    /// green), so the walk-down step is removed rather than kept as unreachable code.
+    /// Remaining entries are then split as evenly as possible (`n / count` per group, the
+    /// first `n % count` groups getting one extra), so every group lands within one of
+    /// `base` and `base + 1`, both inside `[B, 2B]` by construction.
+    private static func groupSizes(for n: Int) -> [Int] {
+        guard n > 0 else { return [] }
+        if n <= 2 * branchingFactor { return [n] }
+        let count = (n + 2 * branchingFactor - 1) / (2 * branchingFactor)
+        let base = n / count
+        let remainder = n % count
+        return (0..<count).map { $0 < remainder ? base + 1 : base }
+    }
+
+    private static func packLeaves(_ items: [Item]) -> [Node<Item>] {
+        var result: [Node<Item>] = []
+        let groups = groupSizes(for: items.count)
+        result.reserveCapacity(groups.count)
+        var start = 0
+        for size in groups {
+            result.append(.makeLeaf(Array(items[start..<(start + size)])))
+            start += size
+        }
+        return result
+    }
+
+    private static func packInteriors(_ nodes: [Node<Item>]) -> [Node<Item>] {
+        var result: [Node<Item>] = []
+        let groups = groupSizes(for: nodes.count)
+        result.reserveCapacity(groups.count)
+        var start = 0
+        for size in groups {
+            result.append(.makeInterior(Array(nodes[start..<(start + size)])))
+            start += size
+        }
+        return result
+    }
+
+    /// The bottom-up bulk build itself (M1.2): pack `items` into a leaf level via
+    /// `packLeaves`, then repeatedly pack the previous level's nodes into an interior level
+    /// via `packInteriors` until one node remains. O(n) total — `groupSizes` is O(1) per
+    /// level and every item/node is copied into exactly one new array slot per level it
+    /// belongs to, and the number of levels is O(log n) with a geometrically shrinking node
+    /// count, so the total work across all levels is O(n), not O(n log n) (contrast the old
+    /// recursive-halving-plus-`concat` build this replaced — see the file header).
+    ///
+    /// A per-height-slot `TreeBuilder` was considered and rejected without being written:
+    /// `TreeBuilder.push`'s own doc comment says it is not an amortised-O(1)-per-height-slot
+    /// builder, and feeding it a whole leaf level one node at a time (`push(subtree:)`
+    /// descending the accumulator's right spine for every single node) would reproduce the
+    /// O(n log n) cost this round exists to remove, just spelled differently. This is a
+    /// second construction path alongside `TreeBuilder`'s, not a violation of "one
+    /// rebalancing implementation" (see the file header): `TreeBuilder` exists to join
+    /// *loose fragments produced by a single cursor descent* (`split`/`cut`,
+    /// `Rope.generalPathReplace`) in push order, a shape this bulk build never has — it
+    /// starts from a flat, already-ordered item list with no fragments to reconcile.
     private static func build(_ items: [Item]) -> Node<Item> {
+        guard !items.isEmpty else { return .makeLeaf([]) }
+        var level = packLeaves(items)
+        while level.count > 1 {
+            level = packInteriors(level)
+        }
+        return level[0]
+    }
+
+    /// Test-only: the pre-M1.2 recursive-halving-plus-`concat` bulk build, kept so a
+    /// differential test can confirm the new bottom-up `build` above produces a tree equal
+    /// to (not just as valid as) what the old path produced for the same input — see the
+    /// file header. `internal`, not `private`: reached only via `@testable import Text`
+    /// from `sumTreeTests.swift`/`ropePerfTests.swift`.
+    internal static func buildViaRecursiveHalvingForTesting(_ items: [Item]) -> Node<Item> {
         if items.count <= 2 * branchingFactor {
             return .makeLeaf(items)
         }
         let mid = items.count / 2
-        let left = build(Array(items[0..<mid]))
-        let right = build(Array(items[mid...]))
+        let left = buildViaRecursiveHalvingForTesting(Array(items[0..<mid]))
+        let right = buildViaRecursiveHalvingForTesting(Array(items[mid...]))
         return concatNodes(left, right)
     }
 
