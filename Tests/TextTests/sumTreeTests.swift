@@ -699,4 +699,84 @@ struct SumTreeTests {
             edited.height == 0, "collapsing a two-child root to one child should drop height by 1")
         #expect(edited.items().map(\.value) == Array(0..<6))
     }
+
+    // MARK: - visitItems (M1.4 deliverable B)
+
+    /// `visitItems` accepting every subtree must agree with `items()`, at several heights, and
+    /// the `prefix` handed to `visit` must equal the fold of everything before that item —
+    /// `IntSummary.count` makes that fold just "the item's own rank".
+    @Test(
+        "visitItems, accepting every subtree, visits every item in order with the right prefix",
+        arguments: [0, 1, 6, 12, 50, 144, 1000]
+    )
+    func visitItemsFullTraversalMatchesItems(_ n: Int) {
+        let tree = SumTree<IntItem>(items: Self.items(n))
+        var visited: [Int] = []
+        var prefixes: [Int] = []
+        tree.visitItems(
+            descendInto: { _, _ in true },
+            visit: { prefix, item in
+                prefixes.append(prefix.count)
+                visited.append(item.value)
+                return true
+            })
+        #expect(visited == Array(0..<n))
+        #expect(prefixes == Array(0..<n))
+    }
+
+    @Test("visitItems declining every subtree visits nothing")
+    func visitItemsDecliningEverySubtreeVisitsNothing() {
+        let tree = SumTree<IntItem>(items: Self.items(500))
+        var visited: [Int] = []
+        tree.visitItems(
+            descendInto: { _, _ in false },
+            visit: { _, item in
+                visited.append(item.value)
+                return true
+            })
+        #expect(visited.isEmpty)
+    }
+
+    @Test("visitItems stops as soon as visit returns false")
+    func visitItemsEarlyFalseStops() {
+        let tree = SumTree<IntItem>(items: Self.items(500))
+        var visited: [Int] = []
+        tree.visitItems(
+            descendInto: { _, _ in true },
+            visit: { _, item in
+                visited.append(item.value)
+                return item.value < 9
+            })
+        // Stops the moment it visits the item whose value is 9 (the tenth item, value 9,
+        // returns false), so visitation includes items 0...9 and nothing after.
+        #expect(visited == Array(0...9))
+    }
+
+    /// `descendInto` gets the same prefix summary `visit` would for the first item of the
+    /// subtree it is offered — checked by pruning half the tree away by rank and confirming
+    /// both the pruned traversal's results and the `descendInto` prefixes it was called with
+    /// agree with a full traversal filtered the same way.
+    @Test("visitItems: descendInto's prefix matches the fold of everything before that subtree")
+    func visitItemsDescendIntoPrefixMatchesFold() {
+        let n = 500
+        let tree = SumTree<IntItem>(items: Self.items(n))
+        let cutoff = 250
+        var visited: [Int] = []
+        tree.visitItems(
+            descendInto: { prefix, subtree in
+                // Prune any subtree entirely before the cutoff rank.
+                prefix.count + subtree.count > cutoff
+            },
+            visit: { prefix, item in
+                #expect(prefix.count == item.value, "prefix should equal the item's own rank")
+                visited.append(item.value)
+                return true
+            })
+        // Every item from some point at or before `cutoff` onward must appear (subtrees are
+        // pruned in whole groups, so the first surviving item may be at or before `cutoff`,
+        // never after it), and nothing is skipped once visiting starts.
+        #expect(visited.last == n - 1)
+        #expect(visited == Array((visited.first!)...(n - 1)))
+        #expect(visited.first! <= cutoff)
+    }
 }

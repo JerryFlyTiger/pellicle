@@ -800,6 +800,55 @@ package struct SumTree<Item: Summable>: Sendable {
         findNode(root, prefix: .identity, predicate: predicate)
     }
 
+    /// Visits items in order, skipping any subtree the caller declines. `prefix` is the summary
+    /// of everything strictly before the node or item being offered, so a caller with a
+    /// prefix-sum dimension can compute absolute positions. Returning `false` from `visit` stops
+    /// the traversal. `descendInto` is given the prefix and the candidate subtree's own summary.
+    ///
+    /// `find`, `cut` and `seek` all follow a single path because their predicate is monotone
+    /// over the prefix: exactly one child can be entered per level. This primitive is for
+    /// callers whose query can enter *several* children at one level (M1.4's overlap query);
+    /// it knows nothing about what `descendInto`/`visit` decide, only how to walk the tree
+    /// while respecting their answers. Recursion is bounded by height, like `items()`.
+    package func visitItems(
+        descendInto: (_ prefix: Item.Item_Summary, _ subtree: Item.Item_Summary) -> Bool,
+        visit: (_ prefix: Item.Item_Summary, _ item: Item) -> Bool
+    ) {
+        _ = Self.visitNode(root, prefix: .identity, descendInto: descendInto, visit: visit)
+    }
+
+    /// The recursion behind `visitItems`. Returns `false` to mean "stop the whole traversal"
+    /// (propagated up from a `visit` that returned `false`), `true` to mean "keep going" —
+    /// including the case where `descendInto` declined this node, which is not a stop, just a
+    /// skip. Mutation focus: the `descendInto` guard below (test 18/mutation 10 in
+    /// `dev/specs/m1.4.md`) — dropping it makes every subtree visited regardless of what the
+    /// caller asked to prune.
+    private static func visitNode(
+        _ node: Node<Item>, prefix: Item.Item_Summary,
+        descendInto: (Item.Item_Summary, Item.Item_Summary) -> Bool,
+        visit: (Item.Item_Summary, Item) -> Bool
+    ) -> Bool {
+        guard descendInto(prefix, node.summary) else { return true }
+        switch node {
+        case .leaf(let items, _):
+            var cum = prefix
+            for item in items {
+                if !visit(cum, item) { return false }
+                cum = cum + item.summary
+            }
+            return true
+        case .interior(let children, _, _):
+            var cum = prefix
+            for child in children {
+                if !visitNode(child, prefix: cum, descendInto: descendInto, visit: visit) {
+                    return false
+                }
+                cum = cum + child.summary
+            }
+            return true
+        }
+    }
+
     /// Joins two trees of any heights into one. O(log n) in the taller tree's height.
     package static func concat(_ a: SumTree, _ b: SumTree) -> SumTree {
         SumTree(root: concatNodes(a.root, b.root))

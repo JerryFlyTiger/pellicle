@@ -25,12 +25,16 @@
 package struct BufferSnapshot: Sendable {
     package private(set) var text: Rope
     package private(set) var markers: MarkerTree
+    package private(set) var intervals: IntervalTree
     private var nextMarkerID: MarkerID
+    private var nextIntervalID: IntervalID
 
     package init() {
         self.text = Rope()
         self.markers = MarkerTree()
+        self.intervals = IntervalTree()
         self.nextMarkerID = 0
+        self.nextIntervalID = 0
     }
 
     // No `init(text:markers:)`. It would have to fabricate `nextMarkerID` (colliding with
@@ -42,15 +46,21 @@ package struct BufferSnapshot: Sendable {
     // caller needs it.
 
     /// The one edit funnel: replaces `byteRange` in `text` with `other`, then applies the
-    /// same edit to `markers` via `MarkerTree.applyEdit` — same `byteRange`, and
-    /// `insertedLength` read from `other.utf8Count` (the only two facts `applyEdit` needs,
+    /// same edit to `markers` and `intervals` via their own `applyEdit` — same `byteRange`,
+    /// and `insertedLength` read from `other.utf8Count` (the only two facts `applyEdit` needs,
     /// both already in scope here, matching `Rope.replaceSubrange`'s own funnel comment that
-    /// this is the only call site where both are available at once).
+    /// this is the only call site where both are available at once). `markers` and
+    /// `intervals` cannot desync from each other or from `text` because both are driven from
+    /// this one call, with the one `byteRange`/`insertedLength` pair (`dev/specs/m1.4.md`
+    /// deliverable D).
     package mutating func replaceSubrange(
         _ byteRange: Range<Int>, with other: Rope, insertBeforeMarkers: Bool = false
     ) {
         text.replaceSubrange(byteRange, with: other)
         markers = markers.applyEdit(
+            byteRange: byteRange, insertedLength: other.utf8Count,
+            insertBeforeMarkers: insertBeforeMarkers)
+        intervals = intervals.applyEdit(
             byteRange: byteRange, insertedLength: other.utf8Count,
             insertBeforeMarkers: insertBeforeMarkers)
     }
@@ -83,5 +93,42 @@ package struct BufferSnapshot: Sendable {
         nextMarkerID += 1
         markers = markers.inserting(byteOffset: byteOffset, bias: bias, id: id)
         return id
+    }
+
+    /// Creates a new interval spanning `byteRange`, preconditioning both endpoints are in
+    /// range and on scalar boundaries via `Rope.isScalarBoundary` — exactly as `createMarker`
+    /// does (`dev/specs/m1.4.md` deliverable D). Returns the fresh, never-reused id.
+    package mutating func createInterval(
+        byteRange: Range<Int>, frontAdvance: Bool = false, rearAdvance: Bool = false
+    ) -> IntervalID {
+        precondition(
+            byteRange.lowerBound >= 0 && byteRange.upperBound <= text.utf8Count,
+            "BufferSnapshot.createInterval: byte range out of range")
+        precondition(
+            text.isScalarBoundary(byteRange.lowerBound),
+            "BufferSnapshot.createInterval: lower bound \(byteRange.lowerBound) is not a scalar boundary"
+        )
+        precondition(
+            text.isScalarBoundary(byteRange.upperBound),
+            "BufferSnapshot.createInterval: upper bound \(byteRange.upperBound) is not a scalar boundary"
+        )
+        let id = nextIntervalID
+        nextIntervalID += 1
+        intervals = intervals.inserting(
+            range: byteRange, id: id, frontAdvance: frontAdvance, rearAdvance: rearAdvance)
+        return id
+    }
+
+    /// Every interval overlapping `byteRange`, under GNU's `overlays-in` rule
+    /// (`dev/specs/m1.4.md` 1.7): `includingEmptyAtUpperBound` is computed here — the only
+    /// place that knows the buffer's end — as `byteRange.isEmpty || byteRange.upperBound ==
+    /// text.utf8Count`, the clause `IntervalTree` itself takes as a parameter rather than
+    /// deciding on its own, since it holds no text (`dev/specs/m1.4.md` 1.6's closing
+    /// paragraph, "the `bufferEnd` clause is the caller's, not the tree's").
+    package func intervals(overlapping byteRange: Range<Int>) -> [IntervalSpan] {
+        intervals.intervals(
+            overlapping: byteRange,
+            includingEmptyAtUpperBound: byteRange.isEmpty
+                || byteRange.upperBound == text.utf8Count)
     }
 }
