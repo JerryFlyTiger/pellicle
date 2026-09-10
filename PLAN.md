@@ -502,13 +502,14 @@ read caught the table claiming otherwise about itself.
 | Single-scalar insert, fast path | O(log n) | M1.1b | measured: 2.57 us at 1 MB, 3.90 at 10 MB |
 | Single-scalar insert, general path | O(log n) | M1.1b | measured: 12.8 us at 1 MB, 16.7 at 10 MB |
 | Build a rope from a `String` | O(n) | M1.2 | measured: 1.9-3.9 ms at 1 MB, 20.9-24.5 ms at 10 MB (the build it replaced: 2.60 and 25.72) |
-| byte <-> UTF-16 <-> scalar <-> line/column conversion | O(log n) | M1.2 | measured: 0.53 us at 1 MB, 0.77 at 10 MB (descent plus a <= 64-byte chunk scan, never a scan from the start) |
+| byte <-> UTF-16 <-> scalar <-> line/column conversion | O(log n) | M1.2 | measured, four whole-file runs: **0.59-0.82 us at 1 MB, 0.70-1.00 at 10 MB** (descent plus a <= 64-byte chunk scan, never a scan from the start). *Corrected 2026-09-10 (M1.3): this row read 0.53 and 0.77 us. Those were unmeasurable -- `conversionCost` timed each of 30 samples with `Date()`, whose smallest non-zero tick on this machine is 0.954 us, so every sample was zero or one tick and the mean was the tick-straddle fraction. The test now batches a nanosecond clock over 20000 precomputed offsets, as `generalPathInsertCost` already did* |
 | Stream every chunk in order | O(1) per chunk, no allocation | M1.2 | measured: **3.86 / 4.01 ns/chunk** cross-module at 1 MB / 10 MB, against 18.23 / 16.93 for the flatten it replaced, both arms alternating in one process; 27-57 ns/chunk before the 4.2 promotion |
-| Marker lookup | O(log n) | M1.3 | not yet built |
-| Adjust every marker after an edit | O(log n) regardless of marker count | M1.3 | not yet built; M1's DoD names one million markers |
+| Marker lookup by position or rank | O(log n) | M1.3 | built, **not separately benchmarked**: one `SumTree.find` descent, the same mechanism as the already-measured rope conversions. A cold read caught this row saying "measured" when no test times it; the honest claim is the mechanism, not a number |
+| Resolve an anchor by marker identity | O(log n) | **M5** | not yet built; see the obstruction note in `dev/specs/m1.3.md` section 3 -- an ID-ordered index cannot absorb an edit in less than O(k) unless what it stores is shift-invariant, and the only shift-invariant quantities are rank (destroyed by marker creation) and relative order (needs order-maintenance labelling plus a persistent ID map). No M1.4 or M1.5 client asks for it; the Elisp `marker` object is the first that does |
+| Adjust every marker after an edit | O(log n) regardless of marker count | M1.3 | **counted, not inferred**: `pathCopyEdit` recurses into one child per level, so an edit visits `height + 1` nodes -- **4 / 5 / 6** at 10k / 100k / 1M markers, counted by hooking the predicate closures during the worktree investigation, so like the 3M figures below they are a one-off diagnostic the shipped suite does not re-measure, and 20-34 summary comparisons for an edit anywhere in the tree at every size. Wall clock, release, 1000 samples, random offsets, base tree held alive across the timed region, four whole-file runs: **1.02-1.06 / 1.13-1.24 / 1.58-1.66 us**, i.e. about 1.6x across two decades against `log2`'s 1.5x. Markers *strictly inside* a deleted range remain O(k): 100k collapse in 2.03-2.07 ms, 20.3-20.7 ns each |
 | Overlay / text-property lookup | O(log n + k) | M1.4 | not yet built |
 | Open a 2 GB file read-only | under one second | **M1.6** | not yet built |
-| Close a large buffer | iterative, no recursion | M1.1 | measured: no-deep-recursion release test |
+| Close a large buffer | iterative, no recursion | M1.1 | measured: no-deep-recursion release test. **Iterative is not free**: dropping the last reference to a tree is O(n) in its distinct nodes -- a marker tree measures 1.7-2.8 ms at 1M markers and 4.9-8.9 ms at 3M, paid synchronously by whoever releases it. M1.5's branching undo and M1.6's mmap view will hold many snapshots at once; releasing a chain of them is O(total distinct nodes). Found in M1.3 by an ARC-placement bug, not by design review |
 
 - Persistent B+-tree rope; every mutation rebuilds the path to the edited leaves, so
   snapshots are structural sharing and background readers never lock.
@@ -516,9 +517,20 @@ read caught the table claiming otherwise about itself.
   tree-sitter (bytes) and the display (graphemes, lazily) all need; the `maxLineLen` summary
   is how a 20 MB single-line file is detected and laid out lazily instead of wrapped eagerly.
 - Markers live in a **marker tree**: an order-statistics balanced tree keyed by position with
-  lazily propagated offsets, so an edit adjusts every marker after it in O(log n) regardless
-  of marker count, and a lookup is O(log n) (Emacs's linear marker list is its documented
-  scaling limit). The tree is persistent like the rope, so a `BufferSnapshot` carries the
+  offsets stored **relative to the previous marker**, so an edit adjusts every marker after it
+  in O(log n) regardless of marker count, and a lookup is O(log n) (Emacs's linear marker list
+  is its documented scaling limit). *Amended 2026-09-10 (M1.3): this line said "lazily
+  propagated offsets". The requirement is the complexity bound, not the mechanism, and
+  relative encoding is the persistent-data-structure equivalent of lazy propagation -- it
+  makes "shift everything after K" a single-item update, which is exactly what lazy
+  propagation buys in a mutable tree. True lazy propagation is in tension with persistence by
+  construction: pushing a pending delta into children mutates nodes that older snapshots
+  share, and path-copying the push-down makes it not lazy, only a differently spelled path
+  copy.* Markers **strictly inside a deleted range** are the one case that is not O(log n):
+  they all collapse to the range start, so a deletion spanning k markers costs O(k + log n).
+  That is inherent under the no-retained-history constraint below -- nothing makes k distinct
+  positions become equal in less than O(k) without a history to replay -- and GNU pays it
+  linearly too. The tree is persistent like the rope, so a `BufferSnapshot` carries the
   marker positions of its moment and background readers resolve anchors against it. This is
   deliberately **not** Zed's anchor design: Zed resolves anchors through a CRDT fragment
   history with retained tombstones, which conflicts with R3's "memory never grows" unless a
@@ -2551,6 +2563,171 @@ incorrect *fact* and record a disagreement about *wording*; each of these is the
   definition of done pointing at a table that was never written, and a criterion (the 2 GB
   read-only open) that belonged to no sub-milestone. Both are now in 4.5 and section 8.
 
+### M1.3: the marker tree -- done 2026-09-10
+
+`Sources/Text/MarkerTree.swift` and `Sources/Text/BufferSnapshot.swift`, with
+`Tests/TextTests/markerTreeTests.swift` and `markerTreePerfTests.swift`; spec in
+`dev/specs/m1.3.md`. The one edit to shared machinery is a comment in `SumTree.swift`, whose
+`pathCopyEdit` precondition said `Rope.tryLeafLocalReplace` was its only caller's caller.
+
+**The design.** Markers are gap-encoded in a `SumTree<MarkerRecord>` ordered by a doubled key
+`2 * byteOffset + biasRank`, where `.left` is GNU's `marker-insertion-type nil` and `.right`
+is `t`. Two things fall out. Because gaps are relative, "shift every marker at or after K"
+changes exactly one item, so it is one `pathCopyEdit` descent. Because the key is doubled,
+every `.left` marker at a position sorts immediately before every `.right` one there, so the
+whole of GNU's insertion-type behaviour is a choice of which number to seek to -- no bias
+dimension in the summary, no O(m) split of a tie group. Nothing in `SumTree.swift` or
+`SumTreeCursor.swift` changed: `Summable` needs one associated type and one `var summary`,
+and a `private struct` in a test file already conforms.
+
+4.5 said "lazily propagated offsets". That was amended: **the requirement is the complexity
+bound, not the mechanism.** True lazy propagation conflicts with persistence -- pushing a
+pending delta into children mutates nodes older snapshots share, and path-copying the
+push-down makes it not lazy, only a differently spelled path copy -- and it would need a slot
+on `Node`, which the rope shares and `dev/check-inlining.sh` guards by name. Relative
+encoding is the persistent equivalent.
+
+**The spec was wrong about the edit rule, and the implementer caught it by running the
+oracle.** The spec described `applyEdit` as one fused pass with `delta = 2 * (L - (hi - lo))`.
+That does not reproduce the spec's own `replace-at-marker` oracle row: a `.right` marker at
+`lo` (key `2*lo + 1`) falls in the fused table's "unchanged" row, but GNU puts it after the
+inserted text. **GNU has no atomic replace primitive with its own marker rule** -- a replace
+is a delete then an insert, each adjusting markers by its own rule, so a marker that survives
+the delete sitting at `lo` is afterwards indistinguishable from any other marker there and is
+pushed by the insertion. The implementation is that two-stage composition. A second
+correction came with it, not oracle-checkable because GNU exposes no order among markers tied
+at one position: the collapse must repartition markers *already* at `lo` together with those
+collapsing in, or a newly-collapsed `.left` marker (key `2*lo`) lands after a resident
+`.right` one (key `2*lo + 1`) and breaks non-decreasing key order. The cold read reproduced
+both and built the counterexample for the second.
+
+**Scope: no resolution by marker identity, and 4.5's table now says so.** The tree is ordered
+by position; an edit is a contiguous range in position order and an arbitrary subset in ID
+order, so no ID-ordered index absorbs an edit in less than O(k) unless what it stores is
+shift-invariant, and the only shift-invariant quantities are rank (destroyed by marker
+creation) and relative order (needs order-maintenance labelling plus a persistent ID map --
+a milestone of its own). No M1.4 or M1.5 client asks for it. 4.5's "Marker lookup" row was
+ambiguous between positional and identity lookup; it now names the first and a new row gives
+the second to M5. Without that split, "complexity benchmarks match the table in 4.5" was
+unauditable in the same way the table's absence was until 2026-09-09. `MarkerRecord` carries
+`id` from the first commit so the later index has a target.
+
+**Mutation pass: seven designed, six killed, one survived and the survivor was right.**
+`shiftingSingleItem` guarded a `pathCopyEdit` with `rank(atOrAfterKey:) < count`. Removing it
+broke nothing -- because `pathCopyEdit` returns `nil` when its predicate is never true and the
+next line already handles that. The guard was redundant *and* cost a second full descent on
+the path every edit takes. Removed. The spec's seventh mutation was aimed at the wrong
+function: the guard that is load-bearing protects `SumTreeCursor.seek`, which really does
+trap, and lives in `markers(in:)` -- where the cold read then found it had no test at all.
+
+**Three measurement lessons, each of which produced a number that was recorded and wrong.**
+
+1. **The instrument could not resolve the quantity.** `insertBeforeAllMarkers` timed each
+   sample with `Date()`, whose smallest non-zero tick here is **0.954 us**, and reported means
+   of 0.5-1.1 us. Every sample was zero or one tick; the "mean of 30" was the fraction that
+   straddled a tick. The tell was 10k and 100k printing the *identical* value to 13
+   significant figures, which the implementer flagged as out of scope rather than passing
+   over. `RopePerfTests.conversionCost` had the same defect and M1.2's row in 4.5 quoted its
+   output; both are corrected here.
+2. **ARC put an O(n) teardown inside the timed region, invisibly.** `let base` was bound
+   outside the sample loop and last used inside it, so the release landed before the closing
+   clock read, charging 30 edits with one whole-tree destruction. Hence 70-133 us at 1M. Four
+   independent checks settled it: elapsed time is affine in the sample count (slope 1.11
+   us/sample, intercept 2.90 ms at 1M); a 200-iteration warm-up changes nothing; teardown
+   measured directly is 1.7-2.8 ms at 1M; and one statement keeping `base` alive drops 1M from
+   95.91 us to 1.07 us. This also explains a spread this record previously attributed to suite
+   composition: **where the optimiser places that release is not stable**, so the same binary
+   read 0.89 us in one process and 3.64 in another.
+3. **Counting beat timing.** Node visits were counted by hooking the predicate closures, no
+   product change: `pathCopyEditNode` recurses into one child per level, so visits are
+   `height + 1` -- **4 / 5 / 6 at 10k / 100k / 1M**, and 20-34 summary comparisons for an edit
+   anywhere in the tree at every size. Those counts are a one-off diagnostic: the hooks
+   lived in the investigation's worktree, and no shipped test re-counts them. Two timing attempts were wrong and one count was right
+   the first time. A count is exact, cache-independent, and immune to where ARC puts a
+   release; prefer it whenever the claim is about a complexity class.
+
+The honest wall-clock numbers, after both fixes, from the shipped test's own runs on this
+machine rather than from the investigation's worktree: **1.02-1.06 / 1.13-1.24 / 1.58-1.66
+us** at 10k / 100k / 1M over four whole-file runs, 1000 samples, random offsets, release,
+base held alive -- about 1.6x across two decades against `log2`'s 1.5x. The bound moved from 1000 us to **10 us**, which has power against a
+constant-factor regression instead of only against a fall to O(n).
+
+**What the cold read found, beyond the two above.** `BufferSnapshot.init(text:markers:)` set
+`nextMarkerID = 0` regardless of the IDs already in the tree it was handed, so every caller
+would reissue colliding IDs; it had no callers and the spec never asked for it, and it was
+deleted rather than patched, on the same reasoning that kept `Anchor` out. The widened
+collapse group and the `markers(in:)` guard both had no directed test and now do. The
+differential generator drew deletions from `Uniform[0, 64]` against insertions from
+`Uniform[0, 7]`, about **-28.5 bytes per operation**, so the buffer collapsed to single digits
+almost immediately and the million-op run spent its time on an 8-byte buffer -- which also
+explains the 12-minute debug run better than "debug is slow" did. Rebalanced, and the test now
+asserts the distribution it reached so the degeneracy cannot return unnoticed. A memory figure
+of 3.24 bytes per marker was printed for a 16-byte record; it was an allocator-state artifact,
+now 22.05-22.06 bytes per marker with a `MemoryLayout<MarkerRecord>.stride * n` floor assertion under it.
+
+**Two findings from the last review round recorded rather than acted on.** The
+`withExtendedLifetime` added to `conversionCost` is described as "the number did not move
+outside noise"; the before-sample was two runs, which is thin, and the 10 MB range widened
+downward (0.97-0.98 to 0.70-1.00) rather than staying put. Read-only reading cannot settle
+whether that is noise or a small real effect, the comment already hedges it, and nothing
+depends on the answer -- the bound is 60x looser than any mean. And `markerSpan > 200` is a
+bare constant in both differential tests while every other threshold beside it scales with
+`maxBufferLength`, whose values differ 8x between the two files; it is a degeneracy floor
+either way, so the inconsistency is style, not a defect.
+
+*Round 5 of the cold read reported nothing fix-worthy, which is what closed this milestone.*
+It re-derived the collapse arithmetic (2.03 ms / 100,000 = 20.3 ns), confirmed the file now
+holds one authority for bytes per marker, and left one note recorded rather than acted on: a
+161-character doc-comment line where the rest of the file wraps near 100. `swift format lint
+--strict` does not flag it because it does not reflow `///` trivia, and it is formatting, so
+it is recorded here instead of buying another review round. This entry transcribes that
+round; it is the loop's terminator, not a new batch.
+
+**Five rounds, and what each one cost.** Round 1 read the milestone and found eight things,
+two of them real defects. Rounds 2 through 5 read only what the previous round's fixes
+produced, and the top finding in three consecutive rounds was **a number that disagreed with
+another copy of itself**. The pattern is worth naming because it beat three separate attempts
+to stop it: a figure gets restated somewhere convenient, the restatement drifts or rounds
+differently, and then someone -- usually the main conversation -- copies the restatement
+rather than the source. The bytes-per-marker figure went source (22.050960-22.064304) ->
+loose restatement in a neighbouring comment (22.05-22.07) -> `PLAN.md`, twice. Correcting
+`PLAN.md` did not help, because the restatement was still there to be copied again; the fix
+that worked was deleting the restatement so the sentence points at the measurement instead of
+repeating it. **A number should exist in exactly one place, and every other mention should be
+a pointer to it.**
+
+**Standing risks.**
+
+- **Dropping a marker tree is O(n)**, 1.7-2.8 ms at 1M and 4.9-8.9 ms at 3M, paid
+  synchronously by whoever releases the last reference. `SumTree.swift` recorded only that
+  teardown does not recurse deeply, which is true and orthogonal. 4.5's "Close a large buffer"
+  row now carries the cost. M1.5 and M1.6 hold many snapshots at once.
+- **An ARC release can move O(n) work into any timed region and the source will not show it.**
+  `RopePerfTests.generalPathInsertCost` was checked the same way and is unaffected.
+- `RopePerfTests.scalingRatio` had the milder form of the `Date()` defect (2.5-4.8 ticks per
+  sample) and was re-instrumented; its ratio still varies 1.04-2.23 between runs, which is why
+  the file pairs it with an absolute bound.
+- The 10 MB rope conversion grows about 2.2x per decade against `log2`'s 1.17x. Nothing
+  depends on it and it is far inside its bound, but it is a measured shape 4.5 calls O(log n)
+  and nobody has explained it.
+- **The memory measurement is still sensitive to allocator state**, and the floor assertion is
+  what makes that visible instead of silent. Adding a 3M size to the edit benchmark -- tried in
+  the last fix round, and cheap in wall clock -- made `memoryForOneMillionMarkers` report
+  **13.44 bytes per marker** in one run of two, below `MarkerRecord`'s own 16-byte stride;
+  without it, the test's own runs sat at 22.05-22.06. The 3M size was dropped for that reason,
+  not for cost. Anything that changes this suite's composition can move that number.
+- **The 3M figures this record quotes are one-off diagnostics**, from the worktree investigation
+  that found the teardown bug -- 1.29 us per edit and 4.9-8.9 ms teardown. No shipped test
+  measures 3M, so a 3M-scale regression has nothing to catch it, and those numbers cannot be
+  re-derived by running the suite.
+- Marker offsets must be UTF-8 scalar boundaries, and that precondition is untested by
+  construction -- every randomised test draws from a rope's valid boundary set, so reaching the
+  trap needs an out-of-process crash harness this project does not have, exactly as
+  `Rope.swift` already records for its own.
+- A snapshot is a value, so forking one and editing both branches reuses marker IDs. M1.5's
+  branching undo must decide the allocation story.
+
+
 ## Icon, 2026-09-07 (out of milestone order, at the owner's request)
 
 **The mark.** A lowercase lambda -- Emacs Lisp -- inside Lisp parentheses, its right leg
@@ -3080,9 +3257,14 @@ whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be r
 - **What M1.3 inherits.** `Chunk` is a plain `package struct` conforming to a
   `@usableFromInline` protocol and it compiles, so a marker `Item` needs only `package` plus a
   `Summable` conformance -- no further visibility changes and no per-`Item` wrapper. M1.4's
-  overlay `Item` is the second client that gets a vote on the `Summable` item-merge hook the
-  unchecked `combineUnderflowedSiblings` join point still wants (stage 2 deferred it there by
-  name; M1.2 had no second client either and left it alone).
+  overlay `Item` is the second client that gets a vote on the item-merge hook stage 2 deferred
+  by name. *Corrected 2026-09-10 (M1.3): this said the hook was one "the unchecked
+  `combineUnderflowedSiblings` join point still wants". A read-only survey checked the
+  function against that description and it does not match -- `combineUnderflowedSiblings`
+  (`SumTree.swift:468`) concatenates two sibling arrays and splits at the midpoint, calling
+  nothing on `Item`, and **no item-merge hook exists anywhere in `Summable` or its callers**,
+  declared or invoked. So this is a hook that would have to be added if a client ever wants
+  one, not a seam already present and waiting to be satisfied. M1.3 needed none.*
 - **Check every count a record makes about itself** -- table rows against the sentence
   introducing them, list items against the heading, review rounds against what happened. This
   file has got one wrong in three consecutive milestone records, and every time a cold read
