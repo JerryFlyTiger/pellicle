@@ -488,6 +488,192 @@ struct MarkerTreeTests {
         #expect(tree.position(ofRank: 1) == 9)
     }
 
+    // MARK: - Node-visit count (the O(log n) claim's regression test)
+
+    /// A line-for-line replica of `pathCopyEditNode`'s own descent control flow
+    /// (`SumTree.swift`), minus the rebuild: scan a node's items/children in order, calling
+    /// `predicate` on the running summary after each one, descend into the first one where it
+    /// becomes true, and stop. `pathCopyEditNode` has no other way to choose which child to
+    /// descend into, so for the same tree and the same monotone predicate this necessarily
+    /// follows the same path — but a hand-written replica walking the tree's own structure
+    /// would report `height + 1` regardless of what the *real* `pathCopyEditNode` actually
+    /// does (every root-to-leaf path in a well-formed `SumTree` has that many nodes on it by
+    /// the uniform-leaf-depth invariant alone), so this function's `visits` return value is
+    /// not, by itself, evidence about the real code. What ties it to the real code is
+    /// `predicateCalls`: `nodeVisitsAreHeightPlusOne` feeds a counting wrapper of the *same*
+    /// predicate to the real `SumTree.pathCopyEdit` and asserts the real call count equals
+    /// this replica's prediction. Since both this replica's and `pathCopyEditNode`'s predicate
+    /// calls happen in the same order-scan-until-true shape, node for node, item for item, an
+    /// exact match is only possible if the real code visited the same nodes in the same
+    /// order — a regression that visits an extra node, re-checks a sibling, or fans out to a
+    /// second child changes the total, and the test fails.
+    ///
+    /// `preconditionFailure`s if `predicate` never becomes true within `node`, mirroring
+    /// `pathCopyEditNode`'s own implicit assumption (a caller of `pathCopyEdit` whose
+    /// predicate never triggers gets `nil` back untouched, one level up — this replica has no
+    /// such caller, so it traps instead, which is what a test wants from a broken assumption).
+    private func countedDescent<Item: Summable>(
+        _ node: Node<Item>, prefix: Item.Item_Summary, predicate: (Item.Item_Summary) -> Bool,
+        visits: inout Int, predicateCalls: inout Int
+    ) {
+        visits += 1
+        switch node {
+        case .leaf(let items, _):
+            var cum = prefix
+            for item in items {
+                let next = cum + item.summary
+                predicateCalls += 1
+                if predicate(next) { return }
+                cum = next
+            }
+            preconditionFailure("countedDescent: predicate never true within this leaf")
+        case .interior(let children, _, _):
+            var cum = prefix
+            for child in children {
+                let next = cum + child.summary
+                predicateCalls += 1
+                if predicate(next) {
+                    countedDescent(
+                        child, prefix: cum, predicate: predicate, visits: &visits,
+                        predicateCalls: &predicateCalls)
+                    return
+                }
+                cum = next
+            }
+            preconditionFailure(
+                "countedDescent: predicate never true within this interior node")
+        }
+    }
+
+    /// Reference-type counter for the wrapped predicate below — a `var` captured by a
+    /// non-escaping-looking-but-actually-stored closure needs a box, not a local `var`, since
+    /// the closure is handed to `SumTree.pathCopyEdit` and called from inside it, not inline.
+    private final class CallCounter {
+        var count = 0
+    }
+
+    /// **The gap this closes.** M1.3's evidence for "adjusting every marker after an edit is
+    /// O(log n)" was a *count of node visits* (`pathCopyEditNode` recurses into exactly one
+    /// child per level, so a single-item edit visits `height + 1` nodes) taken from
+    /// instrumentation in a throwaway git worktree that no longer exists — `PLAN.md`'s M1.3
+    /// record says so honestly. The shipped perf test
+    /// (`markerTreePerfTests.swift`'s `insertBeforeAllMarkers`) only re-measures *time*,
+    /// asserting `mean < 10 us` at 1M against a measured 1.58-1.66 us — about 6x headroom. A
+    /// regression that **doubled** the visit count (say, `pathCopyEditNode` fanning out to two
+    /// children per level instead of one, the pre-M1.1b `O(B * h^2)` shape `SumTree.swift`'s
+    /// file header describes) would roughly double the time to ~3.2 us at 1M and still **pass**
+    /// that bound. This test counts visits directly — deterministic, no release build, no
+    /// warm-up, no timing noise — so it catches exactly the doubled-constant case the timing
+    /// bound cannot, *and* it catches it in the real code, not only in a replica: see
+    /// `countedDescent`'s doc comment for why counting a replica's own traversal alone would
+    /// not have been enough.
+    ///
+    /// **Approach: replica plus agreement**, the task brief's first option — but the agreement
+    /// checked is against the real function's *call pattern*, not only its final result. A
+    /// counting wrapper around exactly `shiftingSingleItem`'s own predicate
+    /// (`{ $0.count > 0 && $0.span >= boundary }`, `boundary = 2 * offset + 1` for
+    /// `insertBeforeMarkers == false`, `applyEdit`'s default) is passed to the real
+    /// `SumTree.pathCopyEdit`, called on `MarkerTree.testOnlySumTree` — the actual tree
+    /// `applyEdit` operates on, not a separately built stand-in. The real call count is
+    /// asserted equal to `countedDescent`'s prediction for the same tree and predicate; a
+    /// result-only agreement check (the edited marker's id and position, via the real
+    /// `MarkerTree.applyEdit`) is kept alongside it as a second, independent signal.
+    ///
+    /// **Holds anywhere in the tree, not only at offset 0.** The investigation this follows up
+    /// on reported 20-34 *summary comparisons* (predicate evaluations) for edits at 1/4, 2/4
+    /// and 3/4 of the buffer at every size — a different, larger number from the *node-visit*
+    /// count `height + 1`, because one node visit can cost more than one predicate call (a
+    /// node's own loop checks each item/child in turn until the predicate fires, so an interior
+    /// node with up to `2B = 12` children can cost up to 12 predicate calls for one visit).
+    /// This test asserts `visits == height + 1` at five positions spanning the tree (start,
+    /// 1/4, 1/2, 3/4, and the last marker) at each size, and finds it holds **everywhere
+    /// tested** — which follows from `SumTree`'s own structural invariant (uniform leaf depth,
+    /// checked by `checkInvariants()`): every root-to-leaf path in a well-formed tree has
+    /// exactly `height + 1` nodes on it, regardless of which leaf it ends at. What is *not*
+    /// structurally guaranteed, and what the real-call-count check above actually stands guard
+    /// over, is that the descent visits only **one** node per level rather than fanning out to
+    /// more.
+    @Test(
+        "node visits for a single-marker-edit descent are height + 1, at five offsets, n = 10^4/10^5/10^6"
+    )
+    func nodeVisitsAreHeightPlusOne() throws {
+        for n in [10_000, 100_000, 1_000_000] {
+            var sorted: [(byteOffset: Int, bias: MarkerBias, id: MarkerID)] = []
+            sorted.reserveCapacity(n)
+            for i in 0..<n {
+                let bias: MarkerBias = i % 2 == 0 ? .left : .right
+                sorted.append((byteOffset: i * 8, bias: bias, id: MarkerID(i)))
+            }
+            let tree = MarkerTree(sortedMarkers: sorted)
+            let sumTree = tree.testOnlySumTree
+            let expectedVisits = Int(sumTree.height) + 1
+
+            // n is even at every size tested here, so the last rank (n - 1, odd index) is
+            // always .right bias -- its own key equals `boundary` below, so the predicate is
+            // guaranteed to fire on it even at the tree's last item. An odd n would need a
+            // different last sample offset to avoid `countedDescent`'s trap.
+            let sampleRanks = [0, n / 4, n / 2, (3 * n) / 4, n - 1]
+            for rank in sampleRanks {
+                let offset = tree.position(ofRank: rank)
+                let bias = tree.bias(ofRank: rank)
+                let id = tree.id(ofRank: rank)
+                let boundary = 2 * offset + 1  // insertBeforeMarkers == false, applyEdit's default
+                let predicate: (MarkerSummary) -> Bool = { $0.count > 0 && $0.span >= boundary }
+
+                var visits = 0
+                var predicateCalls = 0
+                countedDescent(
+                    sumTree.root, prefix: .identity, predicate: predicate, visits: &visits,
+                    predicateCalls: &predicateCalls)
+                let visitMessage =
+                    "n=\(n) rank=\(rank) offset=\(offset): descent visited \(visits) nodes, "
+                    + "expected height + 1 = \(expectedVisits)"
+                #expect(visits == expectedVisits, "\(visitMessage)")
+
+                // Ties the replica's prediction to the real code: the real `pathCopyEdit`
+                // (the one `MarkerTree.shiftingSingleItem` calls) is invoked here directly,
+                // with a counting wrapper around the identical predicate and an `edit` closure
+                // that leaves the leaf's items unchanged (no need to actually edit anything to
+                // observe the call count). An `edit` returning the leaf untouched still
+                // produces `.ok`, never `.declined`, so `pathCopyEdit` cannot return `nil` here.
+                let counter = CallCounter()
+                let countingPredicate: (MarkerSummary) -> Bool = { summary in
+                    counter.count += 1
+                    return predicate(summary)
+                }
+                let realResult = sumTree.pathCopyEdit(
+                    where: countingPredicate, edit: { items, _, _ in items })
+                let nilMessage =
+                    "n=\(n) rank=\(rank) offset=\(offset): the real pathCopyEdit returned nil "
+                    + "for a predicate the replica above proved triggers"
+                #expect(realResult != nil, "\(nilMessage)")
+                // `pathCopyEdit` itself calls `predicate(.identity)` once, up front, as its own
+                // `!predicate(.identity)` precondition check (`SumTree.swift`) -- one call this
+                // replica's descent never makes, since it starts scanning from the root's first
+                // item/child rather than probing the bare prefix. `+ 1` accounts for exactly
+                // that one call, confirmed by running this check before adding the `+ 1`: every
+                // sample failed with `counter.count` exactly one over `predicateCalls`, never
+                // any other delta -- see this task's report for that raw run.
+                let expectedRealCalls = predicateCalls + 1
+                let callMessage =
+                    "n=\(n) rank=\(rank) offset=\(offset): the real SumTree.pathCopyEdit made "
+                    + "\(counter.count) predicate calls, expected \(expectedRealCalls) "
+                    + "(replica's \(predicateCalls) node/item-scan calls + 1 for pathCopyEdit's "
+                    + "own precondition check) -- a mismatch means the real descent visited a "
+                    + "different set of nodes/items than height + 1 accounts for"
+                #expect(counter.count == expectedRealCalls, "\(callMessage)")
+
+                let edited = tree.applyEdit(byteRange: offset..<offset, insertedLength: 1)
+                #expect(edited.id(ofRank: rank) == id)
+                let expectedOffset = bias == .right ? offset + 1 : offset
+                let editMessage =
+                    "n=\(n) rank=\(rank) offset=\(offset) bias=\(bias): applyEdit produced "
+                    + "\(edited.position(ofRank: rank)), expected \(expectedOffset)"
+                #expect(edited.position(ofRank: rank) == expectedOffset, "\(editMessage)")
+            }
+        }
+    }
+
     // MARK: - Differential property test
 
     /// The reference model: a plain array, applying the same rules `MarkerTree.applyEdit`

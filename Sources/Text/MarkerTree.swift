@@ -173,7 +173,10 @@ extension MarkerRecord: Summable {
 /// relative, so `SumTree.concat` is not marker-safe on its own (joining two marker trees
 /// produces silently wrong positions everywhere after the seam unless the right-hand tree's
 /// first gap is rebased against the left-hand total span first) — every split/concat inside
-/// this type rebases, so no caller can reach one that does not.
+/// this type rebases, so no caller can reach one that does not. The one exception is
+/// `testOnlySumTree` below, an `internal` read-only accessor: it cannot put a tree back,
+/// because `init(tree:)` stays `private`, and `internal` keeps it invisible outside a
+/// `@testable import`.
 package struct MarkerTree: Sendable {
     private var tree: SumTree<MarkerRecord>
 
@@ -380,6 +383,20 @@ package struct MarkerTree: Sendable {
             throw SumTreeInvariantViolation(messages: violations)
         }
     }
+
+    // MARK: - Test-only affordances
+
+    /// Test-only: exposes the internal `SumTree` itself so a test can walk its actual node
+    /// structure and count how many nodes one `applyEdit`'s underlying `pathCopyEdit` descent
+    /// visits — the follow-up to M1.3's "adjust every marker is O(log n)" claim, whose only
+    /// evidence was a node-visit count taken in a throwaway worktree (`PLAN.md`'s M1.3
+    /// record). `internal`, not `private`: `@testable import Text` upgrades this to visible
+    /// from `Tests/TextTests/markerTreeTests.swift`, the same convention this module already
+    /// uses for test-only affordances elsewhere (`SumTree.init(root:)`, `Rope.
+    /// tryLeafLocalReplace`) — a plain accessor rather than a counting mechanism itself, so
+    /// the counting logic (and its proof that it walks the same path `pathCopyEditNode`
+    /// would) lives entirely in the test, not here.
+    internal var testOnlySumTree: SumTree<MarkerRecord> { tree }
 
     // MARK: - applyEdit
 
