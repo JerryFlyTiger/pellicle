@@ -483,6 +483,8 @@ struct TextSummary { utf8, utf16, scalars, lines, firstLineLen, lastLineLen, max
 enum Node<Item: Summable> { case leaf([Item], Summary); case interior([Node], Summary, height) }
 final class TextBuffer { root: Node<Chunk>; overlays: Node<OverlayRecord>; history; clock }
 struct BufferSnapshot: Sendable { root, overlays, clock }   // O(1) to take, free to share
+// Built so far (M1.3, M1.4): `BufferSnapshot { text: Rope; markers: MarkerTree; intervals:
+// IntervalTree }`, one edit funnel, no history and no clock until something reads one.
 final class MarkerTree { /* order-statistics tree of marker positions with lazy offsets */ }
 struct Anchor: Sendable, Hashable { markerID, bias }  // resolved against a snapshot's MarkerTree
 ```
@@ -507,7 +509,8 @@ read caught the table claiming otherwise about itself.
 | Marker lookup by position or rank | O(log n) | M1.3 | built, **not separately benchmarked**: one `SumTree.find` descent, the same mechanism as the already-measured rope conversions. A cold read caught this row saying "measured" when no test times it; the honest claim is the mechanism, not a number |
 | Resolve an anchor by marker identity | O(log n) | **M5** | not yet built; see the obstruction note in `dev/specs/m1.3.md` section 3 -- an ID-ordered index cannot absorb an edit in less than O(k) unless what it stores is shift-invariant, and the only shift-invariant quantities are rank (destroyed by marker creation) and relative order (needs order-maintenance labelling plus a persistent ID map). No M1.4 or M1.5 client asks for it; the Elisp `marker` object is the first that does |
 | Adjust every marker after an edit | O(log n) regardless of marker count | M1.3 | **counted, not inferred**: `pathCopyEdit` recurses into one child per level, so an edit visits `height + 1` nodes -- **4 / 5 / 6** at 10k / 100k / 1M markers, counted by hooking the predicate closures during the worktree investigation, so like the 3M figures below they are a one-off diagnostic the shipped suite does not re-measure, and 20-34 summary comparisons for an edit anywhere in the tree at every size. Wall clock, release, 1000 samples, random offsets, base tree held alive across the timed region, four whole-file runs: **1.02-1.06 / 1.13-1.24 / 1.58-1.66 us**, i.e. about 1.6x across two decades against `log2`'s 1.5x. Markers *strictly inside* a deleted range remain O(k): 100k collapse in 2.03-2.07 ms, 20.3-20.7 ns each |
-| Overlay / text-property lookup | O(log n + k) | M1.4 | not yet built |
+| Overlay / text-property lookup | O(log n + k) *(amended, see right)* | M1.4 | **built; the flat form is not what an augmented B-tree with items only in the leaves can deliver, and the honest claim is two-part.** The query is three searches (`dev/specs/m1.4.md` 1.6): starts inside the range, rank-contiguous, one descent plus O(k) cursor steps; straddlers, found by a **strict** `maxEnd > lo` prune over the rank prefix, where every visited node holds a result, so O(log n + k) when the results are rank-contiguous and O((k + 1) log n) worst case, k results scattered one per leaf each costing their own root-to-leaf path; and the empty interval at the upper bound, one more descent. Counted, not timed, by `boundaryEmptyIntervalsAtScale` and `queryVisitsAreOutputSensitive`. Measured, release, 1000 samples, n = 100,000, three whole-file runs: **1.69-1.94 us** at `k` near zero, and **64.2-65.0 us** for a 2,000-result window (200 samples, three runs). The second figure is the one with teeth: the first implementation reconstructed each scanned item's absolute start with a fresh root-to-leaf `find` instead of the `gap` the cursor had already handed back, making the scan O(k log n), and **no correctness test could see it** because the results were identical -- the counted visit tests instrument the straddler prune, and this scan does not go through it. `largeResultOverlapQuery` is the guard, and it is mutation-proven: putting the per-item `find` back measures **851-863 us**, 13x the fixed figure, against a 120 us bound |
+| Adjust every interval after an edit | O((k + 1) log n + a + m + e) | M1.4 | measured: **3.30-3.54 us** at n = 100,000, release, 1000 samples, three whole-file runs, single-byte insertion at a random offset. `k` is the intervals whose extent genuinely changes (those straddling the edit point, each one independent `pathCopyEdit`), `a` those whose start lies strictly inside a deleted range (the contiguous collapse group), and `m` the tie group at the insertion point, which stage 2 stably partitions -- **`m` is a real term**: a keystroke where several overlays happen to start pays it with `k = 0`, and the doubled key `MarkerTree` uses would not remove it, because the exception in `startMoves` depends on `insertBeforeMarkers`, a property of the edit rather than of the item, so no static key sorts the movers into a suffix for every edit. The insert stage adds one more term the delete stage does not have: its straddler search must prune non-strictly (`maxEnd >= p`), because an interval whose end lands *exactly* on the insertion point still moves when `rearAdvance` or `insertBeforeMarkers` holds and a strict prune would discard it unvisited -- a silent lost `length` update, confirmed by mutation. So that search is O(log n + k + e), `e` being the intervals whose end is exactly the insertion offset. Removing `e` needs a second augmented dimension carrying the max end **restricted to items with `rearAdvance`**; deliberately not built in M1.4 |
 | Open a 2 GB file read-only | under one second | **M1.6** | not yet built |
 | Close a large buffer | iterative, no recursion | M1.1 | measured: no-deep-recursion release test. **Iterative is not free**: dropping the last reference to a tree is O(n) in its distinct nodes -- a marker tree measures 1.7-2.8 ms at 1M markers and 4.9-8.9 ms at 3M, paid synchronously by whoever releases it. M1.5's branching undo and M1.6's mmap view will hold many snapshots at once; releasing a chain of them is O(total distinct nodes). Found in M1.3 by an ARC-placement bug, not by design review |
 
@@ -539,7 +542,17 @@ read caught the table claiming otherwise about itself.
   (`(+ (point-marker) 1)`) resolves at use.
 - Overlays and text properties live in one augmented interval tree (both start and max-end
   summarised, closing the gap Emacs 29's `itree.c` records as bug#58342). Property lookups
-  are O(log n + k).
+  are O(log n + k); the table above amends that to its two-part form, which is what M1.4
+  measured and counted. **The interval tree is built (M1.4); text properties are not on it
+  yet** -- a text property is a plist and there are no Lisp values until M2, so M5 wires them
+  onto the same tree. Three facts from the GNU oracle that no reader would guess and that the
+  M1.4 record keeps with its transcripts: `insert-before-markers` **overrides both**
+  `front-advance` and `rear-advance`, so every endpoint at the insertion point advances;
+  an empty overlay with `front-advance` and not `rear-advance` would **invert** under the
+  per-endpoint rule (GNU keeps it where it is, which the implementation expresses as a
+  conjunct of the "does the start move" predicate rather than as a clamp after the fact); and
+  `overlays-in`'s docstring is wrong for an empty query range -- `(overlays-in 5 5)` returns
+  a *non-empty* overlay containing 5, which shares no character with the region.
 - Undo is transaction-based (grouped by command and by a 300 ms window), stored as edit
   logs plus retained snapshot checkpoints; branches are native, so an undo-tree UI is a view.
 - Multi-cursor edits are one transaction with per-anchor bias rules.
@@ -2161,6 +2174,12 @@ item-level coalescing hook -- the same design decision the seam policy faced and
 the builder for, and one M1.4's overlay tree gets a vote in, since it will be the second `Item`
 type. Deciding it here, with one client, would be deciding it on half the evidence.
 
+*M1.4 cast that vote, and it is **no** (2026-09-11).* Intervals carry identity: two adjacent
+intervals with equal fields are two distinct overlays, and merging them would destroy an object
+the Lisp side holds a reference to. So the second `Item` type does not want the hook either, and
+the deferral stands with one interested client rather than a tie. The chunk-packing gap is
+unchanged and still belongs to whoever needs it.
+
 #### Mutations, executed by the main conversation
 
 | mutation | result |
@@ -2750,6 +2769,132 @@ calls precede `edit`, so the count must not move) and the count did not move.
   branching undo must decide the allocation story.
 
 
+### M1.4: the interval tree for overlays -- done 2026-09-11
+
+`Sources/Text/IntervalTree.swift`, one new generic primitive in `SumTree.swift`, and the third
+field of `BufferSnapshot`, with `Tests/TextTests/intervalTreeTests.swift`,
+`intervalTreePerfTests.swift` and four `visitItems` tests in `sumTreeTests.swift`; spec in
+`dev/specs/m1.4.md`. Gate: `Test run with 178 tests in 19 suites passed`.
+
+**The design.** Intervals are ordered by start in a `SumTree<IntervalRecord>`, the start
+gap-encoded as `MarkerTree` does and the extent stored as a **length**, so an interval entirely
+after an edit needs no visit at all -- shifting its start shifts its end for free -- and only
+the ones straddling the edit point, whose extent genuinely changed, are touched. The summary
+augments the order statistic and the prefix sum with `maxEnd` **measured relative to the range's
+own base**, which is what keeps it shift-invariant; it is a monoid with `max(a.maxEnd, a.span +
+b.maxEnd)`, and the right identity law needs the invariant `maxEnd >= span`, which
+`checkInvariants()` asserts on every node. No doubled key: the insert stage rebuilds the tie
+group at the insertion point anyway, so it stably partitions it into non-movers then movers and
+one gap edit finishes the job.
+
+**Three things the GNU oracle said that nobody would have guessed, all now in 4.5's prose and
+in the tests with their transcripts.** `insert-before-markers` **overrides both** advance flags
+-- the funnel already carried the flag for markers and it turns out to apply to overlays too.
+An empty overlay with `front-advance` and not `rear-advance` would **invert** under the naive
+per-endpoint rule (GNU keeps it still); the implementation expresses that as a conjunct of
+`startMoves` rather than as a clamp applied after a shift, because the tree stores a gap and a
+length, so there is no representation in which one endpoint moves alone. And `overlays-in`'s
+docstring is simply wrong for an empty query range: `(overlays-in 5 5)` returns a *non-empty*
+overlay containing 5, which shares no character with the region. Deletion, by contrast, is
+**independent of both flags** across all twenty combinations, and a replace is a delete then an
+insert -- M1.3's lesson, re-verified here row by row.
+
+**Seven rounds of cold review on the spec, before a line was written.** They caught two defects
+that would have become wrong code, and both had already survived my own reasoning. First, the
+mover rule: "the tie-group members with `frontAdvance`" sweeps up the empty interval the clamp
+exists to protect, and one gap edit cannot express the exception, which is what forced the
+predicate form above. Second, the query prune: my first draft was strict and lost an empty
+interval sitting at `lo`; the fix relaxed it to `maxEnd >= lo` and **destroyed the complexity
+claim** -- `M` intervals all ending at `M`, queried at `lo == M`, return nothing while every
+leaf survives the prune. The answer was not a third threshold but the three-piece decomposition
+now in 1.6, each piece output-sensitive on its own. The remaining rounds found a restated bound
+that had dropped a term (the failure this file names as the top finding of three consecutive
+M1.3 rounds, caught this time before it reached `PLAN.md`), and four cases of a test being
+weaker than the mutation it was supposed to observe -- including that test 8's fixture would
+catch a broken `maxEnd` combine or not **depending on which order the author happened to type
+two intervals sharing a start**.
+
+**What the cold read of the implementation found.** Three things, all real. The query was
+**O(k log n), not O(log n + k)**: pieces 1 and 3 reconstructed the running absolute start with a
+fresh root-to-leaf `find` per scanned item, while the cursor was already handing back the record
+whose `gap` is exactly that delta -- a defect against the milestone's central claim, invisible
+to every counted test because those instrument `visitItems` and this path does not use it. The
+visit-count test **could not see the mutation it exists for**: it fed `SumTree.visitItems` a
+`descendInto` closure hand-written in the test, so relaxing the real prune changed nothing it
+looked at; both prunes are now `internal` factory functions and the tests wrap those. And
+`checkInvariants()` **folded with the operator it was checking** at interior nodes, so a wrong
+combine agreed with itself; it now recomputes with explicit arithmetic and catches that class at
+every level. A dead `firstRankWithEndAfter` with a real double-counting bug in it was deleted
+rather than fixed.
+
+**Mutations: twelve designed, twelve killed, and two of them earned their keep.** Ten came from
+the spec, two from the reviewers. Making the insert stage's prune **strict** -- the deviation the
+implementer flagged and asked about -- kills three oracle tests and the differential, which is
+the evidence that the non-strict prune is necessary rather than sloppy: an interval whose end
+lands exactly on the insertion point still moves when `rearAdvance` holds, and a strict prune
+discards it unvisited, silently losing a `length` update. Its cost is the `e` term in 4.5's new
+row. The other one that mattered was the tie-group mutation, which the differential killed by
+trapping while `tieGroupPartitionKeepsOrder` -- the test written for exactly that -- **passed**:
+its fixture put the group at rank 0 with a non-mover first, where the rebased gap and the item's
+own gap coincide. The fixture now has an interval before the group and a mover first, and the
+mutation fails it on two expectations. That is the second time in two milestones that a test
+named in a spec turned out to be blind to the mutation it was named for, and both times only
+running the mutation showed it.
+
+**Numbers live in 4.5's two rows** -- the query and the per-edit adjustment, both measured on
+this machine in release over three whole-file runs -- and nowhere else in this record. The
+trailing round caught the new edit row's headline bound **dropping its `e` term**, in the same
+record whose paragraph on the spec's review rounds, three above this one, congratulates itself
+for catching that failure before it reached `PLAN.md`. It reached `PLAN.md`; a cold read took it out again. The same round found the
+query fix had no regression test at all -- the defect it repaired is invisible to every
+correctness test and to every counted one -- which is what `largeResultOverlapQuery` now is.
+
+**The last trailing round's findings, transcribed rather than acted on.** It found the record's
+self-reference above off by one paragraph and the new perf test's comment claiming a tree height
+of 6 or 7 where the bulk build gives 4 — both facts, both corrected. Its third finding is
+recorded and declined: `deleteStraddlerVisitsAreOutputSensitive`'s comment says its fixture
+differs from the query test's in "its rank restriction", where strictly the rank restriction
+(`prefix.count < upperRankExclusive`) is identical in both and what differs is the visit
+closure's boundary on the absolute start (`<= lo` against `< lo`, matching `applyDelete`'s own).
+The substance of the sentence is right and the distinction is a matter of naming, so it stays.
+The round after that one reported nothing to change, which is what closed this milestone: it
+re-derived the tree height from `SumTree`'s own bulk build, recounted the paragraphs, and left
+one note recorded rather than acted on -- a 132-character line in this section where the rest
+wraps near 90. `swift format lint` does not reflow Markdown, and it is formatting, so it is
+written here instead of buying another round. This paragraph transcribes those two rounds; it is
+the loop's terminator, not a new batch.
+
+**Declined, with the reason.** Sampling `checkInvariants()` every hundredth edit in the
+differential cannot see a violation that a later path-copy overwrites before the next sample and
+that the round's own query does not hit; no schedule closes that class, per-round checking costs
+20,000 whole-tree folds in a debug gate run, and none of the twelve mutations depends on it. The
+"after every edit that empties an interval" trigger does not fire on the edit that makes two
+already-empty intervals adjacent; same class, and the trigger is a cheap improvement rather than
+a claim of completeness. `maxEndInvariantIsChecked` hand-builds one malformed leaf and so cannot
+be killed by any mutation of the combine operator -- it exists to prove the checker can fire at
+all, which is the `sumTreeTests.swift` negative-test precedent, and the query tests carry the
+real duty. One wording finding on the repair committed as `2820c79` is recorded in that commit's
+message.
+
+**Standing risks.**
+
+- **Text properties are not on this tree yet.** The stickiness oracle is in the spec so it is not
+  rediscovered: text properties default rear-sticky and not front-sticky, the *opposite* default
+  from an overlay's `(nil, nil)`, and `insert` never inherits while `insert-and-inherit` does.
+- **Identity lookup is still O(n) without the caller's start offset**, and 4.5's table gives it
+  to M5 with the obstruction argument from `dev/specs/m1.3.md` section 3. `removing(id:startingAt:)`
+  takes the start so the caller pays O(log n + tie group).
+- **A snapshot is a value**, so forking one and editing both branches reuses interval IDs, the
+  same gap `MarkerTree` records; M1.5's branching undo owns it.
+- **The `e` term has no test.** The insert prune's cost is documented and bounded but neither
+  counted nor timed; a regression that widened it would not fail anything. Its neighbour did get
+  one: `largeResultOverlapQuery` guards the query scan's `O(log n + k)`, with the pre-fix
+  behaviour measured for contrast in 4.5's row. `e` would need the same treatment -- a fixture
+  with many intervals ending exactly at the insertion point -- and does not have it.
+- Interval endpoints must be UTF-8 scalar boundaries, and like `MarkerTree`'s that precondition
+  cannot be reached by a test without an out-of-process crash harness this project does not have.
+
+
 ## Icon, 2026-09-07 (out of milestone order, at the owner's request)
 
 **The mark.** A lowercase lambda -- Emacs Lisp -- inside Lisp parentheses, its right leg
@@ -3256,14 +3401,55 @@ observations and not a rule.
 
 ---
 
+## Handover: how to resume, updated 2026-09-11 (M1.4)
+
+**Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the whole
+briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
+
+- **State**: M0, M1.1, both stages of M1.1b, M1.2, M1.3 and **M1.4** are done, each with a
+  record in section 11. The gate is green (`Test run with 178 tests in 19 suites passed`, plus
+  the isolated allocation probe `dev/gate.sh` now runs after it). Working tree clean.
+- **Next work item**: **M1.5**, undo -- transaction-based, grouped by command and by a 300 ms
+  window, edit logs plus retained snapshot checkpoints, branches native so an undo-tree UI is a
+  view (4.5). Then M1.6, the line-indexed mmap view for huge read-only files, which is the last
+  criterion in M1's definition of done that no sub-milestone owned until 2026-09-09.
+- **What M1.5 inherits.** `BufferSnapshot` now pairs `text`, `markers` and `intervals` through
+  **one** edit funnel; a fourth thing joins it there or not at all. Do not add a `clock` until
+  something reads one -- M1.5 is the first milestone that plausibly does, and that is a decision
+  to make on its own evidence rather than by inheritance.
+- **Two things M1.5 must decide that M1.3 and M1.4 both deferred to it.** A snapshot is a value,
+  so forking one and editing both branches **reuses marker and interval IDs**; branching undo is
+  exactly that fork, so it owns the allocation story. And dropping a tree is O(n) in its distinct
+  nodes, paid synchronously by whoever releases the last reference -- undo holds many snapshots
+  at once, so the cost of releasing a chain of them is M1.5's to measure, not to assume.
+- **Do not redo these.** Identity-based resolution is deliberately absent from both trees and 4.5
+  gives it to M5. The item-merge hook on `Summable` was voted down by M1.4 and the chunk-packing
+  gap it would have fixed stays deferred. The insert stage's non-strict prune is deliberate and
+  mutation-proven necessary; its cost is the `e` term in 4.5's row.
+- **The lesson M1.4 paid for twice, and M1.3 once before it.** A test named in a spec as the one
+  that catches a mutation is a **hypothesis until the mutation is run**. Both milestones had a
+  test that looked exactly right and was blind -- M1.4's because its fixture put the tie group
+  where the correct and incorrect gap coincide, and its visit-count test because it compared
+  against a hand-written copy of the predicate instead of the real one. Run every mutation the
+  spec lists, and when one dies in a test other than the named one, that is a finding about the
+  named test, not a bookkeeping detail.
+- **Check every count a record makes about itself.** Still true, still cheap. This handover's own
+  test count was wrong for a day.
+- **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`. The
+  spec is worth seven review rounds before implementation starts -- M1.4's caught two defects
+  that would otherwise have been written, debugged and reviewed as code.
+
+
 ## Handover: how to resume, updated 2026-09-10 (M1.3)
 
 **Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the
 whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
 - **State**: M0, M1.1, both stages of M1.1b, M1.2 and **M1.3** are done, each with a record in
-  section 11. The gate is green (`Test run with 149 tests in 17 suites passed`). Working tree
-  clean.
+  section 11. The gate is green (`Test run with 150 tests in 17 suites passed`). Working tree
+  clean. *(This line said 149 until 2026-09-11: the M1.3 follow-up commit added
+  `nodeVisitsAreHeightPlusOne` and this handover was written from the pre-follow-up count --
+  the milestone-record-counts-itself-wrong failure this file warns about, in the handover.)*
 - **Next work item**: **M1.4**, the interval tree for overlays and text properties (4.5: one
   augmented tree with both start and max-end summarised, closing the gap Emacs 29's `itree.c`
   records as bug#58342; lookups O(log n + k)). Then M1.5 undo, M1.6 the line-indexed mmap view.
