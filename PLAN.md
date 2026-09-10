@@ -2696,6 +2696,28 @@ that worked was deleting the restatement so the sentence points at the measureme
 repeating it. **A number should exist in exactly one place, and every other mention should be
 a pointer to it.**
 
+**Follow-up, 2026-09-10, after the milestone closed.** The node-visit counts above were the
+only direct evidence for the O(log n) claim and were not reproducible, which left a specific
+hole rather than a theoretical one: the perf bound is 10 us against 1.58-1.66 us at 1M, about
+**6x of headroom**, so a regression doubling the visit count from 6 to 12 would roughly double
+the time and still pass -- and M1.4's interval tree is the second client of the same shared
+machinery. `nodeVisitsAreHeightPlusOne` now counts them in the **ordinary** suite, so every
+`dev/gate.sh` run holds the line: counting needs no release build, no warm-up and no sample
+loop, and costs 0.53 s. It derives the expected count from the tree's own `height` rather than
+hardcoding 4/5/6, so it cannot go stale if the packer's fill changes.
+
+Two things about it are worth keeping. The first design -- a replica of the descent plus an
+agreement check on the resulting marker positions -- **would have been worthless**, and the
+implementer said so rather than building it: a replica walking the real `Node` structure
+reports `height + 1` from the uniform-leaf-depth invariant alone whatever the real descent
+does, and comparing results cannot see a regression that visits extra nodes and still returns
+the right answer, which is the entire failure mode. The shipped test instead feeds a counting
+predicate to the **real** `SumTree.pathCopyEdit`. Second, the mutation that matters was run
+and it fails: descending into one extra child per level and discarding the result -- visits
+roughly double, the answer is unchanged -- is caught. A third mutation was designed by the
+cold read against **its own reasoning** (shrink the leaf in the test's edit closure; predicate
+calls precede `edit`, so the count must not move) and the count did not move.
+
 **Standing risks.**
 
 - **Dropping a marker tree is O(n)**, 1.7-2.8 ms at 1M and 4.9-8.9 ms at 3M, paid
