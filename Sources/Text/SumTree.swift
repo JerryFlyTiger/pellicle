@@ -508,9 +508,13 @@ private func pathCopyEditNode<Item: Summable>(
                 guard let newItems = edit(items, i, prefix) else { return .declined }
                 // One split suffices because a leaf is only ever handed to `edit` at its
                 // own `B...2B` cap and the replacement is built from those same items plus
-                // a small bounded splice (see `Rope.tryLeafLocalReplace`, this function's
-                // only caller's caller) — nowhere near `4B`, which is the point at which
+                // a small bounded splice — nowhere near `4B`, which is the point at which
                 // one split at the midpoint could fail to land both halves in `B...2B`.
+                // `Rope.tryLeafLocalReplace` is not this function's only caller's caller any
+                // more: `MarkerTree.shiftingSingleItem` (M1.3) also reaches `pathCopyEdit`,
+                // but only ever to add a delta to one existing gap in place — the edited
+                // leaf's item count never changes, so it stays at most `2B`, well inside the
+                // bound either caller needs.
                 precondition(
                     newItems.count <= 4 * branchingFactor,
                     "pathCopyEdit: edit grew a leaf beyond what one split can repair")

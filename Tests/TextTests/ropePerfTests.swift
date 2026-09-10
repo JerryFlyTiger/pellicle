@@ -189,6 +189,17 @@ struct RopePerfTests {
         print("twentyThousandOperationsLargeRope: 20,000 ops in \(elapsed)s (seed \(seed))")
     }
 
+    /// **Re-instrumented (M1.3 fix round 3): the per-sample `Date()` timing here had a
+    /// milder form of `conversionCost`'s and `insertBeforeAllMarkers`'s defect.** Each
+    /// sample's own per-sample values (2.4-4.6 us) were only 2.5-4.8 `Date()` ticks
+    /// (0.9537 us each) -- not sub-tick like those two, but few enough ticks that the
+    /// tick-straddle fraction is still a meaningful part of the reported mean.
+    /// Re-instrumented the same way: one `DispatchTime.now()` read before the whole batch
+    /// and one after, offsets precomputed outside the timed region. `withExtendedLifetime
+    /// (base)` around the batch is carried over from `insertBeforeAllMarkers` as
+    /// defense-in-depth against the same teardown-inside-the-timed-region hazard that test
+    /// had, even though `rope`'s per-sample drop here only releases the O(log n) nodes the
+    /// edit path-copied, not the whole tree the way `MarkerTree` teardown did.
     @Test("scaling: mean cost of a single random insert at n = 10^4 .. 10^7 bytes")
     func scalingRatio() {
         var rng = SplitMix64(seed: 0x5CA1_E000)
@@ -198,17 +209,19 @@ struct RopePerfTests {
         for n in scales {
             let base = Rope(String(repeating: "a", count: n))
             let samples = 30
-            var total: TimeInterval = 0
-            for _ in 0..<samples {
-                var rope = base
-                let at = Int(rng.next() % UInt64(n + 1))
-                let start = Date()
-                rope.insert("x", at: at)
-                total += Date().timeIntervalSince(start)
+            let offsets = (0..<samples).map { _ in Int(rng.next() % UInt64(n + 1)) }
+            withExtendedLifetime(base) {
+                let start = DispatchTime.now().uptimeNanoseconds
+                for at in offsets {
+                    var rope = base
+                    rope.insert("x", at: at)
+                }
+                let elapsedNanos = DispatchTime.now().uptimeNanoseconds - start
+                let mean = Double(elapsedNanos) / Double(samples) / 1_000_000_000
+                meanCosts[n] = mean
+                print(
+                    "scalingRatio: n=\(n) mean insert cost \(mean)s over \(samples) samples")
             }
-            let mean = total / Double(samples)
-            meanCosts[n] = mean
-            print("scalingRatio: n=\(n) mean insert cost \(mean)s")
         }
 
         let smallCost = meanCosts[scales.first!]!
@@ -501,21 +514,60 @@ struct RopePerfTests {
     /// allocation-free), then scan within it (O(64)). A conversion that scanned from the
     /// start of the buffer would still pass a *ratio* check (uniformly slower at both sizes)
     /// but fail this absolute one.
+    ///
+    /// **Re-instrumented (M1.3 fix round 3): the previous version had exactly the
+    /// `Date()`-per-sample defect that was already fixed in `markerTreePerfTests.swift`'s
+    /// `insertBeforeAllMarkers`.** It timed each of 30 samples individually with `Date()`,
+    /// whose smallest non-zero tick on this machine is 0.9537 us, and reported means of
+    /// 0.53-0.77 us -- below one tick, so every sample landed at zero or one tick and the
+    /// reported mean was the tick-straddle fraction, not the operation's cost. Re-measured
+    /// batched (one `DispatchTime.now()` read before the whole sample loop, one after,
+    /// divided by the sample count -- the same shape `generalPathInsertCost` above and
+    /// `insertBeforeAllMarkers` use) over 20,000 random offsets, precomputed outside the
+    /// timed region. **452 ns at 1 MB, 983 ns at 10 MB was a separate worktree's
+    /// calibration of this fix, not this test's own run** -- this test's own fix-round-3 run
+    /// on the shipped code measured 0.58 us at 1 MB and 0.97-1.08 us at 10 MB, and that
+    /// discrepancy (28% at 1 MB) is exactly the "two authorities, no way to tell which
+    /// describes the code in front of you" problem `CLAUDE.md`'s milestone-execution-loop
+    /// rule exists to prevent, which is why this comment now says explicitly which of the
+    /// two numbers below actually came from this test.
+    ///
+    /// **Fix round 4: added `withExtendedLifetime(rope)`** around the timed loop, the same
+    /// defence-in-depth `scalingRatio` and `insertBeforeAllMarkers` already carry, since
+    /// `rope`'s last use is inside the timed loop and its release could in principle land
+    /// inside the timed region. **This test's own final runs, this machine, release build,
+    /// whole-`RopePerfTests`-file (not isolated -- see `bulkBuildThroughput`'s doc comment
+    /// for why whole-suite is how this file's numbers are actually produced), 20,000
+    /// samples, two runs before the fix and four after:** before, 0.59-0.72 us at 1 MB and
+    /// 0.97-0.98 us at 10 MB; after, 0.59-0.82 us at 1 MB and 0.70-1.00 us at 10 MB. **The
+    /// number did not move outside this test's own run-to-run noise** -- the before/after
+    /// ranges overlap almost entirely, and an isolated single-test run (0.48-0.49 us at
+    /// 1 MB, 0.65-0.66 us at 10 MB) differs from both by about as much as the fix's own
+    /// before/after spread, so this defence, like `scalingRatio`'s, is recorded as a
+    /// precaution against a hazard that did not turn out to be inflating this particular
+    /// number on this machine.
     @Test("conversion cost: Rope.convert(utf8 -> utf16) at 1 MB and 10 MB")
     func conversionCost() {
         for n in [1_000_000, 10_000_000] {
             var rng = SplitMix64(seed: 0x517A_1234)
             let rope = Rope(String(repeating: "abcdefgh", count: n / 8))
-            let samples = 30
-            var total: TimeInterval = 0
-            for _ in 0..<samples {
-                let offset = Int(rng.next() % UInt64(rope.utf8Count))
-                let start = Date()
-                _ = rope.convert(offset: offset, from: .utf8, to: .utf16)
-                total += Date().timeIntervalSince(start)
+            let samples = 20_000
+            let offsets = (0..<samples).map { _ in Int(rng.next() % UInt64(rope.utf8Count)) }
+            // `withExtendedLifetime(rope)`, carried over from `scalingRatio` and
+            // `insertBeforeAllMarkers` as the same defence-in-depth: `rope`'s last use is
+            // inside this timed loop, so without this its release could in principle land
+            // inside the timed region and be divided by `samples` along with the real
+            // per-sample work (fix round 4 -- measured whether the number actually moved; see
+            // this test's doc comment above for the before/after figures).
+            let mean = withExtendedLifetime(rope) { () -> Double in
+                let start = DispatchTime.now().uptimeNanoseconds
+                for offset in offsets {
+                    _ = rope.convert(offset: offset, from: .utf8, to: .utf16)
+                }
+                let elapsedNanos = DispatchTime.now().uptimeNanoseconds - start
+                return Double(elapsedNanos) / Double(samples) / 1_000_000_000
             }
-            let mean = total / Double(samples)
-            print("conversionCost: n=\(n) mean \(mean * 1_000_000) us")
+            print("conversionCost: n=\(n) mean \(mean * 1_000_000) us over \(samples) samples")
             let message =
                 "Rope.convert at n=\(n) cost \(mean * 1_000_000) us, over the 60 us bound "
                 + "(release build) -- a regression tripwire, not a target: it should stay near "
