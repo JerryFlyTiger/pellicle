@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 import Testing
 
 @testable import Text
@@ -483,16 +484,82 @@ struct ConversionAndCursorTests {
     /// (built and warmed up beforehand, so the traversal itself is the only thing being
     /// measured).
     ///
-    /// This is a **whole-process** counter, not scoped to this call, so it is noisy: run
-    /// alone it measured single digits, but run inside the full `TextTests` target (where
-    /// `swift-testing` runs suites concurrently by default) other tests' allocations land in
-    /// the same window and it measured up to ~320 — this suite is marked `.serialized`
-    /// (above) to keep its own tests from overlapping each other, which does not stop
-    /// *other* suites from running at the same time. The bound below is therefore relative
-    /// to the chunk count, not a small fixed constant: `chunkCount / 20` is far above any
-    /// noise level actually measured (320 against a ~25,000-chunk rope's `chunkCount / 20`
-    /// of 1,250).
-    @Test("cursor traversal allocates roughly no more than its own construction, not one per chunk")
+    /// This is a **whole-process** counter, not scoped to this call: inside the full test run
+    /// (where `swift-testing` runs suites concurrently by default) other tests' allocations
+    /// land in the same window. This suite is marked `.serialized` (above), which only keeps
+    /// its own tests from overlapping each other and does not stop other suites — hence the
+    /// isolation gate documented below.
+    ///
+    /// **Why this test is gated on an environment variable and run alone** (2026-09-10).
+    /// It failed the gate twice in six full `swift test --parallel` runs, at deltas of 2,669
+    /// and 4,429 against the 1,250 bound, while passing 3/3 when run alone — a false failure
+    /// every time, since no product code had changed. Two repairs were measured before this
+    /// one, and the numbers are worth keeping because they bound what any in-suite repair can
+    /// achieve:
+    ///
+    /// - *Raising the bound* was rejected on arithmetic: individual windows reached **7,409**,
+    ///   and a bound above a burst is within 3.4x of the 25,000 signal the test exists to
+    ///   catch — and still unbounded, because the noise is other suites' allocation traffic,
+    ///   not a property of this code.
+    /// - *Ten windows, take the minimum* was measured and shipped, then refuted. Five
+    ///   instrumented full runs gave a minimum ≤ 0 every time (-451, -352, -351, -228, -500;
+    ///   negative because other threads free blocks inside the window too), which looked
+    ///   conclusive — bursts appeared to last a few windows, never all ten. A sixth run then
+    ///   failed with all ten windows contaminated: `[2060, 6680, 2572, 1533, 2997, 2916,
+    ///   1473, 3549, 4465, 2585]`, minimum **1,473**. A concurrent suite can allocate steadily
+    ///   for longer than the whole sampling period, so no order statistic over windows inside
+    ///   the parallel run is safe.
+    ///
+    /// What is left is isolation: `malloc_zone_statistics` counts the **whole process**, so
+    /// the measurement is only meaningful when nothing else in the process is allocating.
+    /// `dev/gate.sh` therefore runs this test in its own `swift test --filter` invocation
+    /// with `PELLICLE_ALLOC_PROBE=1`, after the parallel run; the default `swift test` skips
+    /// it, and the gate checks this test's own result line rather than the run summary,
+    /// because swift-testing prints "Test run with 1 test in 1 suite passed" for a *skipped*
+    /// test too.
+    ///
+    /// **Isolation makes the measurement exact, and the bound absolute.** Run this way, fifty
+    /// windows over five runs each read **1** block, with no spread at all, so the bound is an
+    /// absolute **64** rather than the `chunkCount / 20` (1,250) it had to be while sharing a
+    /// process.
+    ///
+    /// **What this test can and cannot see, measured rather than assumed.** Retaining a fixed
+    /// number of extra allocations inside each window and reading the ten samples gives:
+    ///
+    ///     20, 70, 200 one-byte arrays  ->  minimum 2, i.e. not observed at all
+    ///     500                          ->  343
+    ///     2,000                        ->  1,707
+    ///     8,000                        ->  7,845
+    ///     one one-byte array per chunk ->  24,894 over 25,000 chunks
+    ///     200 one-kilobyte arrays      ->  201-203, every one of them
+    ///
+    /// The last row identifies the mechanism, and it is the **allocation size**, not a coarse
+    /// counter: `malloc_default_zone()` is `DefaultMallocZone` (printed with
+    /// `malloc_get_zone_name`), while small allocations on this platform are served by the
+    /// separate nano allocator, so they do not enter this zone's `blocks_in_use` one at a
+    /// time. Kilobyte allocations bypass nano and are counted exactly, one for one. In bulk
+    /// the small ones do surface, but not exactly: the shortfall between retained and counted
+    /// is 157, 293, 155 and 106 across the four small-allocation rows — neither constant nor a
+    /// multiple of any step — so this comment claims only what the rows show, that small
+    /// allocations become visible somewhere between 200 and 500 retained and are then counted
+    /// to within a few hundred. Two earlier versions of this paragraph claimed more: one
+    /// blamed "the counter's granularity", refuted by the 1-kilobyte row and by the quiet
+    /// reading of exactly 1 above; the next named a recurring step "of about 343", refuted by
+    /// those four shortfalls.
+    ///
+    /// So this test sees a leak of large blocks one for one, and a leak of small blocks only
+    /// once it reaches the hundreds; it is blind to a handful of small ones, and no choice of
+    /// bound changes that. 64 sits above the quiet reading of 1 and below the smallest
+    /// small-allocation reading observed — 343, at 500 retained; the 200-to-500 interval was
+    /// not sampled, so where inside it the transition happens is not known.
+    /// `cursorTraversalSharesLeafStorage` below, which compares storage identity, is the
+    /// deterministic defence and depends on none of this.
+    ///
+    /// The ten windows are kept because they cost nothing and put the whole distribution into
+    /// the failure message, which is what made the contamination above diagnosable at all.
+    @Test(
+        "cursor traversal allocates roughly no more than its own construction, not one per chunk",
+        .enabled(if: ProcessInfo.processInfo.environment["PELLICLE_ALLOC_PROBE"] != nil))
     func cursorTraversalAllocatesNothing() {
         let rope = Rope(String(repeating: "abcdefgh", count: 200_000))  // ~1.6 MB, ~25,000 chunks
         // Warm-up pass: absorbs any one-time cost (e.g. the process's own malloc zone
@@ -507,21 +574,27 @@ struct ConversionAndCursorTests {
             return Int(stats.blocks_in_use)
         }
 
-        let before = blocksInUse()
-        var cursor = rope.makeCursor()
+        var samples: [Int] = []
         var chunkCount = 0
-        while let chunk = cursor.next() {
-            chunkCount += 1
-            _ = chunk.count  // touch, so this cannot be entirely optimised away
+        for _ in 0..<10 {
+            let before = blocksInUse()
+            var cursor = rope.makeCursor()
+            var traversed = 0
+            while let chunk = cursor.next() {
+                traversed += 1
+                _ = chunk.count  // touch, so this cannot be entirely optimised away
+            }
+            let after = blocksInUse()
+            chunkCount = traversed
+            samples.append(after - before)
         }
-        let after = blocksInUse()
-        let delta = after - before
+        let delta = samples.min() ?? Int.max
         #expect(chunkCount > 20_000, "expected several thousand chunks, got \(chunkCount)")
-        let bound = chunkCount / 20
+        let bound = 64
         let message =
-            "traversal allocated \(delta) additional malloc blocks over \(chunkCount) chunks "
-            + "(bound \(bound)) -- expected close to nothing (cursor construction plus test-run "
-            + "noise), not one per chunk"
+            "the quietest of ten traversals allocated \(delta) additional malloc blocks over "
+            + "\(chunkCount) chunks (bound \(bound)) -- expected the cursor's own "
+            + "construction and nothing per chunk; all ten windows were \(samples)"
         #expect(delta < bound, "\(message)")
     }
 
