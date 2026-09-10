@@ -126,6 +126,28 @@ against a bar of 8x while every operation was ~100x too slow. And verify a fact 
 *real* type, not a simplified stand-in: `MemoryLayout<Node<Chunk>>.stride` was recorded as 24
 from a probe that used `Int` as the summary; it is 72.
 
+**Three more the marker tree paid for, each of which produced a recorded, wrong number.**
+`Date()`'s smallest non-zero tick on this machine is **0.954 us**, so anything near a
+microsecond timed with it reads zero or one tick and the "mean" is the tick-straddle
+fraction -- the tell was two sizes printing the identical value to 13 significant figures.
+Use `DispatchTime.now().uptimeNanoseconds` taken **once around the whole sample loop**, as
+`RopePerfTests.generalPathInsertCost` does. **ARC can place an O(n) release inside a timed
+region and the source will not show it**: a fixture built outside the loop but last used
+inside it is released there, so 30 samples were charged with one whole-tree teardown; hold it
+with `withExtendedLifetime`, and note that a discarded read like `_ = base.count` is not
+enough because it can be optimised away. Where the optimiser puts that release is not stable,
+so the same binary gave 0.89 us and 3.64 us. And **count the work rather than timing it**
+whenever the claim is a complexity class: hooking the predicate closures gave node visits of
+`height + 1` at every size, exactly and cache-independently, after two timing attempts had
+been wrong.
+
+**A number should exist in exactly one place, and every other mention should point at it.**
+The top finding in three consecutive M1.3 review rounds was a figure disagreeing with another
+copy of itself. The path is always the same: a measurement gets restated somewhere convenient,
+the restatement rounds or drifts, and the next writer copies the restatement rather than the
+source. Correcting the copies does not help while the restatement survives to be copied again
+-- delete it and point at the measurement instead.
+
 Document every known gap (file header plus the "not in v1" section of `PLAN.md`). Mutation-
 test important fixes; where a defence cannot be observed by a test, say so in the test
 comments instead of pretending. **There is no runner here yet** — mutations are done by
