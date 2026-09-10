@@ -3234,51 +3234,46 @@ observations and not a rule.
 
 ---
 
-## Handover: how to resume, updated 2026-09-09 (M1.2)
+## Handover: how to resume, updated 2026-09-10 (M1.3)
 
 **Read this first, then start.** `CLAUDE.md` plus the newest record in section 11 is the
 whole briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
-- **State**: M0, M1.1, both stages of M1.1b, and **M1.2** are done, each with a record in
-  section 11. The gate is green (`Test run with 123 tests in 15 suites passed`) and the perf
-  suite is green ten runs out of ten. Working tree clean.
-- **Next work item**: **M1.3**, the marker tree (4.5: an order-statistics balanced tree with
-  lazily propagated offsets, persistent like the rope; M1's definition of done wants
-  O(log n) per edit at one million markers). Then M1.4 interval tree, M1.5 undo, **M1.6** the
-  line-indexed mmap view for huge read-only files -- M1.6 is new, assigned in M1.2 because
-  M1's definition of done required it and no sub-milestone owned it.
-- **Do not redo these.** `B` was re-swept a second time on the landed cursor and **kept at 6**;
-  stage 2's "re-run it when the cursor lands" is now discharged, and the table is in the M1.2
-  record. The `Fragment.nodes` seam-merge decline was measured again and declined again, with
-  its caveats recorded. The `@usableFromInline` promotion of `SumTreeCursor`/`Node`/`Summary`/
-  `Summable` is applied, measured and guarded -- **do not extend it, and do not let it rot:**
-  `dev/check-inlining.sh` greps those declarations by name, and `iterationCost`'s 15 ns/chunk
-  ceiling is what catches a silent de-promotion.
-- **What M1.3 inherits.** `Chunk` is a plain `package struct` conforming to a
-  `@usableFromInline` protocol and it compiles, so a marker `Item` needs only `package` plus a
-  `Summable` conformance -- no further visibility changes and no per-`Item` wrapper. M1.4's
-  overlay `Item` is the second client that gets a vote on the item-merge hook stage 2 deferred
-  by name. *Corrected 2026-09-10 (M1.3): this said the hook was one "the unchecked
-  `combineUnderflowedSiblings` join point still wants". A read-only survey checked the
-  function against that description and it does not match -- `combineUnderflowedSiblings`
-  (`SumTree.swift:468`) concatenates two sibling arrays and splits at the midpoint, calling
-  nothing on `Item`, and **no item-merge hook exists anywhere in `Summable` or its callers**,
-  declared or invoked. So this is a hook that would have to be added if a client ever wants
-  one, not a seam already present and waiting to be satisfied. M1.3 needed none.*
-- **Check every count a record makes about itself** -- table rows against the sentence
-  introducing them, list items against the heading, review rounds against what happened. This
-  file has got one wrong in three consecutive milestone records, and every time a cold read
-  found it rather than the author. Cheapest class of defect to find, likeliest to reach a
-  commit.
-- **Two measurement rules this milestone paid for**, both in the M1.2 record with the incidents:
-  a performance bound is set from the distribution the assertion is actually executed in, not
-  from the cleanest way to run it (two bounds here were set from isolated runs and failed a
-  third of whole-suite runs on healthy code); and **count passes positively** -- "no failure
-  text in the output" is not evidence of success, and was wrong three times in one milestone,
-  once hiding eight runs that never compiled.
+- **State**: M0, M1.1, both stages of M1.1b, M1.2 and **M1.3** are done, each with a record in
+  section 11. The gate is green (`Test run with 149 tests in 17 suites passed`). Working tree
+  clean.
+- **Next work item**: **M1.4**, the interval tree for overlays and text properties (4.5: one
+  augmented tree with both start and max-end summarised, closing the gap Emacs 29's `itree.c`
+  records as bug#58342; lookups O(log n + k)). Then M1.5 undo, M1.6 the line-indexed mmap view.
+- **What M1.4 inherits from M1.3.** The generic `SumTree` needs no change for a new item type:
+  `Summable` is one associated type and one `var summary`, and `MarkerRecord` demonstrates the
+  whole pattern in `Sources/Text/MarkerTree.swift`. An overlay `Item` is the second client of
+  the item-merge hook stage 2 deferred by name -- and note the correction in section 4.2: that
+  hook **does not exist**, `combineUnderflowedSiblings` calls nothing on `Item`, so it is a
+  thing to add if a client wants it, not a seam waiting to be satisfied.
+- **`BufferSnapshot` is where the second tree hangs.** It pairs `text` and `markers` today and
+  has one edit funnel, `replaceSubrange`, because that is the only place both the byte range
+  and the inserted length are in scope. Overlays join it there. Do not add a `clock` until
+  something reads one.
+- **Do not redo these.** Identity-based anchor resolution is deliberately absent and 4.5's
+  table gives it to M5, with the obstruction argument in `dev/specs/m1.3.md` section 3. The
+  `rank < count` guard removed from `shiftingSingleItem` was redundant, proven by mutation.
+  The `@usableFromInline` promotion is still not to be extended.
+- **Four measurement rules this milestone paid for**, all in the M1.3 record with the
+  incidents: `Date()`'s tick on this machine is **0.954 us**, so anything near a microsecond
+  must use `DispatchTime.now().uptimeNanoseconds` batched around the whole sample loop;
+  **ARC can place an O(n) release inside a timed region** and the source will not show it, so
+  hold the fixture alive with `withExtendedLifetime`; **count the work rather than timing it**
+  when the claim is a complexity class, because a count is exact and immune to both of the
+  above; and **a number should exist in exactly one place**, every other mention being a
+  pointer -- a restatement drifted and was copied three times before that was fixed.
+- **Check every count a record makes about itself.** Still true, still cheap, still the
+  likeliest defect to reach a commit.
 - **How to run it**: one sub-milestone at a time through the eight-step loop in `CLAUDE.md`.
   The mutation pass and the gate belong to the main conversation; the implementer never
-  verifies its own fix. Do not skip the trailing re-review.
+  verifies its own fix. Do not skip the trailing re-review -- M1.3 took five rounds and the
+  fifth still found something.
+
 
 ## Handover: state after M0, 2026-09-06
 
