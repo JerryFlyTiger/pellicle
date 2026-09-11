@@ -3589,6 +3589,33 @@ a rule.
 
 ---
 
+## Handover: how to resume, updated 2026-09-11 (M1.5 stage 1 landed; stage 2 is next)
+
+**Read this first, then start.** `CLAUDE.md`, then section 11's `M1.5 stage 1` record, then
+`dev/specs/m1.5.md` -- the spec is current, having been corrected during implementation wherever
+measurement contradicted it. Do not re-read `PLAN.md` whole. **No figure is restated here**; 4.5's
+rows hold them.
+
+- **State**: M0 through M1.5 stage 1 are done, gate green on a clean tree, two commits
+  (`M1.5: ...` and `PLAN.md: M1.5 stage 1 record`). Nothing is in flight.
+- **Next work item: M1.5 stage 2**, the undo byte budget's pruning policy. It gets its own spec,
+  `dev/specs/m1.5-stage2.md`, written **against the built structure with mutations actually run**
+  -- 1.9 says why prose was the wrong instrument for it and names what stage 2 inherits as
+  settled. Stage 1 has already built everything it needs: `byteCost` per node, the running total
+  maintained on release, the `tombstone`/`promote` pair with their link rules, `discardHistory()`,
+  and `checkInvariants()`. `undoByteBudget` exists and nothing reads it; that is the gap stage 2
+  closes. `m1.1b-stage2.md` is the precedent for a second spec at a stage boundary.
+- **Start stage 2 from the measured memory number, not the formula.** 4.5's memory row and 1.9
+  record that the `byteCost` formula undercounts real retention by about 2x at the smallest
+  transaction, so the budget's translation into bytes resident is the thing stage 2 must either
+  correct for or state.
+- **The one open performance item stage 1 found and did not fix**: `Rope.slice`'s constant
+  dominates undo recording (4.5's recording row). A small-range fast path is a rope change with
+  its own spec, not stage 2's, and nothing blocks on it.
+- **What the ten review rounds kept finding, in case it saves a round**: a figure disagreeing
+  with another copy of itself, and a test whose assertion could not fail for the reason it named.
+  Both were still being found at round ten, in prose written to fix round nine.
+
 ## Handover: how to resume, updated 2026-09-11 (M1.5 spec complete, not implemented)
 
 **Read this first, then start.** `CLAUDE.md`, then `dev/specs/m1.5.md`, which is the whole
