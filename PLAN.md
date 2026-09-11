@@ -481,7 +481,10 @@ milestone, because retrofitting it later is how every custom editor ends up inac
 struct Chunk { var bytes: InlineArray<64, UInt8>; var count: UInt8 }          // leaf payload
 struct TextSummary { utf8, utf16, scalars, lines, firstLineLen, lastLineLen, maxLineLen } // monoid
 enum Node<Item: Summable> { case leaf([Item], Summary); case interior([Node], Summary, height) }
-final class TextBuffer { root: Node<Chunk>; overlays: Node<OverlayRecord>; history; clock }
+final class TextBuffer { root: Node<Chunk>; overlays: Node<OverlayRecord>; history }
+// M1.5: `history` lands as `UndoHistory`; **`clock` does not** -- `dev/specs/m1.5.md` 1.7's
+// four-reader analysis found no reader for a monotonic clock that M1.5 builds, and the one
+// GNU timer that is real (the 10-second safety net) is M5's, with the command loop.
 struct BufferSnapshot: Sendable { root, overlays, clock }   // O(1) to take, free to share
 // Built so far (M1.3, M1.4): `BufferSnapshot { text: Rope; markers: MarkerTree; intervals:
 // IntervalTree }`, one edit funnel, no history and no clock until something reads one.
@@ -511,8 +514,13 @@ read caught the table claiming otherwise about itself.
 | Adjust every marker after an edit | O(log n) regardless of marker count | M1.3 | **counted, not inferred**: `pathCopyEdit` recurses into one child per level, so an edit visits `height + 1` nodes -- **4 / 5 / 6** at 10k / 100k / 1M markers, counted by hooking the predicate closures during the worktree investigation, so like the 3M figures below they are a one-off diagnostic the shipped suite does not re-measure, and 20-34 summary comparisons for an edit anywhere in the tree at every size. Wall clock, release, 1000 samples, random offsets, base tree held alive across the timed region, four whole-file runs: **1.02-1.06 / 1.13-1.24 / 1.58-1.66 us**, i.e. about 1.6x across two decades against `log2`'s 1.5x. Markers *strictly inside* a deleted range remain O(k): 100k collapse in 2.03-2.07 ms, 20.3-20.7 ns each |
 | Overlay / text-property lookup | O(log n + k) *(amended, see right)* | M1.4 | **built; the flat form is not what an augmented B-tree with items only in the leaves can deliver, and the honest claim is two-part.** The query is three searches (`dev/specs/m1.4.md` 1.6): starts inside the range, rank-contiguous, one descent plus O(k) cursor steps; straddlers, found by a **strict** `maxEnd > lo` prune over the rank prefix, where every visited node holds a result, so O(log n + k) when the results are rank-contiguous and O((k + 1) log n) worst case, k results scattered one per leaf each costing their own root-to-leaf path; and the empty interval at the upper bound, one more descent. Counted, not timed, by `boundaryEmptyIntervalsAtScale` and `queryVisitsAreOutputSensitive`. Measured, release, 1000 samples, n = 100,000, three whole-file runs: **1.69-1.94 us** at `k` near zero, and **64.2-65.0 us** for a 2,000-result window (200 samples, three runs). The second figure is the one with teeth: the first implementation reconstructed each scanned item's absolute start with a fresh root-to-leaf `find` instead of the `gap` the cursor had already handed back, making the scan O(k log n), and **no correctness test could see it** because the results were identical -- the counted visit tests instrument the straddler prune, and this scan does not go through it. `largeResultOverlapQuery` is the guard, and it is mutation-proven: putting the per-item `find` back measures **851-863 us**, 13x the fixed figure, against a 120 us bound |
 | Adjust every interval after an edit | O((k + 1) log n + a + m + e) | M1.4 | measured: **3.30-3.54 us** at n = 100,000, release, 1000 samples, three whole-file runs, single-byte insertion at a random offset. `k` is the intervals whose extent genuinely changes (those straddling the edit point, each one independent `pathCopyEdit`), `a` those whose start lies strictly inside a deleted range (the contiguous collapse group), and `m` the tie group at the insertion point, which stage 2 stably partitions -- **`m` is a real term**: a keystroke where several overlays happen to start pays it with `k = 0`, and the doubled key `MarkerTree` uses would not remove it, because the exception in `startMoves` depends on `insertBeforeMarkers`, a property of the edit rather than of the item, so no static key sorts the movers into a suffix for every edit. The insert stage adds one more term the delete stage does not have: its straddler search must prune non-strictly (`maxEnd >= p`), because an interval whose end lands *exactly* on the insertion point still moves when `rearAdvance` or `insertBeforeMarkers` holds and a strict prune would discard it unvisited -- a silent lost `length` update, confirmed by mutation. So that search is O(log n + k + e), `e` being the intervals whose end is exactly the insertion offset. Removing `e` needs a second augmented dimension carrying the max end **restricted to items with `rearAdvance`**; deliberately not built in M1.4 |
+| Record one transaction (undo on) | O(log n + k + e) | M1.5 | measured, 1 MB buffer, single-byte overwrite, both arms in one process: **30.5-36.6 us/op recording against 2.2-3.0 us/op with `isRecordingUndo == false`**. Nearly all of the difference is the one `Rope.slice` that captures the deleted text: measured separately at the same size, a one-byte slice is **34.9 us** while both entry-set queries are 0.02-0.03 us and the funnel itself 3.2 us. A second slice, for the inserted text, was removed during M1.5 -- the funnel is handed that rope and can keep it -- which halved the figure from 62-63 us. **`Rope.slice`'s constant is the open item**: it is two whole-tree splits (`Rope.swift:827`), O(log n) but with a per-level cost three orders above a descent, and a small-range fast path is a rope change with its own spec, not M1.5's |
+| Undo or redo one transaction | O(log n + k + e) | M1.5 | measured: **2.0-7.1 us/op undo, 2.0-14.4 us/op redo**, single-character transactions at 1 MB, 2,000 of each per arm. The spread is scheduling noise, not size: the median run is ~2.1 us both ways |
+| Memory per retained transaction | O(deleted bytes + entries) | M1.5 | measured with the whole-process allocator counter, release, isolated: **381-389 B for a single-character transaction**, three runs. **About 2x `dev/specs/m1.5.md` 1.9's ~190 B formula figure**, because each entry holds one or two small `Rope`s whose fixed node cost (72 B per `Node<Chunk>`, 64-80 B per `Chunk`, 4.16) dwarfs their byte counts. 1.9 records that undercount as 20-40% for a large multi-chunk deletion; at the smallest transaction it is 2x, the same direction. Stage 2's budget arithmetic starts here, so a 2 MB budget is roughly 5,400 single-character transactions of real memory, not 11,000 |
+| Maintain the byte-cost running total | O(1) per commit | M1.5 | measured, both arms in one process: committing into a **9,001-node** history costs **23.3-49.0 us/op** against **39.3-57.2 us/op** into an empty one -- indistinguishable, which is the assertion. A sweep implementation would scale with the node count; the fixture is thousands of nodes precisely because at a handful it would not |
+| Discard a buffer's undo history | O(total distinct nodes released) | M1.5 | measured, median of 15 samples per size, timing only `discardHistory()` with the subject in a file-scope global: **162-172 us at 1,000 one-kilobyte transactions, 896-1,718 us at 5,000**. Each transaction **deletes** its kilobyte as well as inserting it, so the history is the sole owner of what it retains; a first version only inserted, and because an insert over 64 bytes enters the rope as the caller's own subtree and M1.5 records `inserted` as the rope it was handed, every entry shared its nodes with the live text -- that version measured 113-128 us and was releasing bookkeeping arrays, not payload. Five-sample *means* ranged 167-692 us across three runs before the statistic became a median of fifteen; the maxima are still wild (up to 24 ms at n = 5,000, the allocator returning pages), which is why the assertion is on the median |
 | Open a 2 GB file read-only | under one second | **M1.6** | not yet built |
-| Close a large buffer | iterative, no recursion | M1.1 | measured: no-deep-recursion release test. **Iterative is not free**: dropping the last reference to a tree is O(n) in its distinct nodes -- a marker tree measures 1.7-2.8 ms at 1M markers and 4.9-8.9 ms at 3M, paid synchronously by whoever releases it. M1.5's branching undo and M1.6's mmap view will hold many snapshots at once; releasing a chain of them is O(total distinct nodes). Found in M1.3 by an ARC-placement bug, not by design review |
+| Close a large buffer | iterative, no recursion | M1.1 | measured: no-deep-recursion release test. **Iterative is not free**: dropping the last reference to a tree is O(n) in its distinct nodes -- a marker tree measures 1.7-2.8 ms at 1M markers and 4.9-8.9 ms at 3M, paid synchronously by whoever releases it. M1.6's mmap view will hold many snapshots at once; releasing a chain of them is O(total distinct nodes). **M1.5's stage 1 no longer contributes this row's original concern** -- its history retains no `BufferSnapshot`s (4.5's undo bullet, `dev/specs/m1.5.md` 1.1), so an undo history holds deleted text plus fixed-size entries, never trees. It does hold a `Rope` of every transaction's deleted text, and **stage 1 enforces no bound on how many**: `undoByteBudget` is a field nothing reads until stage 2's pruning policy (`dev/specs/m1.5.md` 1.9) gives it a reader. Until then a long session's history grows without limit, which is a known gap and not a property of the design. Found in M1.3 by an ARC-placement bug, not by design review |
 
 - Persistent B+-tree rope; every mutation rebuilds the path to the edited leaves, so
   snapshots are structural sharing and background readers never lock.
@@ -553,8 +561,18 @@ read caught the table claiming otherwise about itself.
   conjunct of the "does the start move" predicate rather than as a clamp after the fact); and
   `overlays-in`'s docstring is wrong for an empty query range -- `(overlays-in 5 5)` returns
   a *non-empty* overlay containing 5, which shares no character with the region.
-- Undo is transaction-based (grouped by command and by a 300 ms window), stored as edit
-  logs plus retained snapshot checkpoints; branches are native, so an undo-tree UI is a view.
+- Undo is transaction-based, stored as an **edit log with no retained snapshots**: each
+  transaction holds its elementary edits plus the marker and interval positions the funnel's
+  rules cannot restore (`dev/specs/m1.5.md` 1.3-1.4). Branches are native, so an undo-tree UI
+  is a view -- and so is the GNU-compatible linear `buffer-undo-list`, which is the same
+  structure read one way. Three clauses of this bullet's first version were wrong and M1.5's
+  spec replaced them: there is **no 300 ms window** (1.7 -- the oracle shows command identity
+  plus a count of 20 plus a fixed 10-second safety-net timer, and the 300 ms figure was this
+  file's own invention recorded as a port of Reticle, which used a character count); there are
+  **no retained snapshot checkpoints** (1.1 -- measured, and the decisive argument is not the
+  19-32x memory ratio but that restoring a snapshot un-creates every marker and interval made
+  since, which GNU never does); and grouping by command is **M5's policy over M1.5's
+  mechanism**, since M1.5 has no command loop to group by.
 - Multi-cursor edits are one transaction with per-anchor bias rules.
 - Read-only huge files (GB logs) are viewed through a line-indexed mmap without building a
   rope until the first edit. **This is M1.6.** It was in M1's definition of done from the
@@ -1342,7 +1360,25 @@ Mac App Store distribution; a TUI or CLI editor mode; running unmodified GNU pac
 full Calc formula language in tables (arithmetic, references and `vsum`-class functions are
 in; symbolic Calc is not); mobile org sync; Tcl debugging;
 collaboration (the rope's transaction log keeps a CRDT possible later, but the marker
-tree is not a CRDT and nothing here retains deleted text); Windows or Linux.
+tree is not a CRDT); Windows or Linux.
+
+**Undoable creation or removal of a marker or an overlay**, matching GNU and decided in M1.5
+(`dev/specs/m1.5.md` section 3). An undo traversal restores the *positions* of markers and
+overlays that already exist, and skips an id that is no longer present; it never resurrects
+one the user removed, and never un-creates one made since. The oracle, run in the main conversation on GNU
+Emacs 30.2 rather than cited from the spec's overlay-only transcript (a cold read caught this
+paragraph's first version citing a session whose marker half was never run): `emacs -Q --batch`
+in a temp buffer holding "hello world", `buffer-undo-list` cleared, a marker set to 4 and an
+overlay over 3-9, then `(delete-region 2 7)` gives `(("ello " . 2) (#<marker at 2 in  *temp*> . -2))`, quoted
+exactly as printed, two spaces before `*temp*` and all --
+one text entry and a marker **position adjustment**, no entry recording that the marker or the
+overlay exists. `(delete-overlay o)` immediately after leaves that list byte-for-byte
+unchanged. So GNU repositions markers through `(MARKER . DISTANCE)` and does not record
+overlays at all. Reticle has the same behaviour by accident, never scoped;
+pellicle records it as a decision. **The clause "nothing here retains deleted text" was
+removed from the paragraph above when M1.5 landed**: an undo history retains the deleted text
+of every transaction, which is the point of it. Stage 2's byte budget will bound how much;
+stage 1 does not, and the "Close a large buffer" row above says so.
 
 ---
 
@@ -2902,6 +2938,149 @@ message.
   with many intervals ending exactly at the insertion point -- and does not have it.
 - Interval endpoints must be UTF-8 scalar boundaries, and like `MarkerTree`'s that precondition
   cannot be reached by a test without an out-of-process crash harness this project does not have.
+
+
+### M1.5 stage 1: undo -- done 2026-09-11
+
+`Sources/Text/UndoHistory.swift` and `Sources/Text/TextBuffer.swift`, new; changes to
+`BufferSnapshot.swift` (the two creators take an id, the counters leave), `MarkerTree.swift` and
+`IntervalTree.swift` (`removingIfPresent`, the undo entry-set query); with
+`Tests/TextTests/undoTests.swift`, `undoPerfTests.swift`, a second isolated stage in
+`dev/gate.sh`, and the 30 `createMarker`/`createInterval` call sites migrated in
+`markerTreeTests.swift` and `intervalTreeTests.swift` (its own commit). Spec in
+`dev/specs/m1.5.md`, written before any code and revised during implementation where
+measurement contradicted it. Gate: `Test run with 219 tests in 21 suites passed`, plus the two
+isolated allocation probes.
+
+**The design, in one paragraph.** A transaction is a list of elementary edits; each elementary
+edit is a byte range, the deleted and inserted ropes, and the marker and interval positions the
+funnel's own rules cannot restore -- derived case by case in the spec's 1.3, not guessed. A
+traversal removes those items from their trees, drives the one funnel
+(`BufferSnapshot.replaceSubrange`) backward or forward, and puts them back at their recorded
+positions, iterating in reverse so tie groups reconstruct. The history is a flat append-only
+array with first-child/next-sibling links, so branches are native and a linear
+`buffer-undo-list` is a view of it. There are no retained snapshots: 1.1 measured both
+representations, and the decisive argument is not the 19-32x memory ratio but that restoring a
+snapshot un-creates every marker and interval made since, which GNU never does.
+
+**What implementation overturned in the spec, each by measurement rather than argument.**
+
+- **The interval entry set closes over tie groups.** 1.4 step 3's "the whole tie group is always
+  inside the entry set" was written on the marker rule and is false for an interval whose start
+  is below `lo`, where membership is decided by *end*: two intervals sharing a start can differ
+  in end, so one is swept in and the survivor is left for the reinsertion to prepend in front
+  of. Measured: two intervals sharing start `0` came back in the opposite order after one undo.
+- **The end search needed a per-item filter**, which is what exposed the above. `visitItems`
+  prunes at subtree granularity and then visits a passing leaf whole, so the entry set depended
+  on B+-tree packing: an edit at `lo = 100` recorded six intervals whose ends were all below 40,
+  purely because they shared a leaf with the one straddler. `applyInsert`, the only pre-existing
+  caller of that search, had always filtered per item; this query had not.
+- **`promote` discards its incoming edge, both halves of it.** As first written it cleared only
+  the promoted node's own fields, leaving the old parent's child chain and `lastVisitedChild`
+  pointing at it -- so `redo()` could walk into an emptied node, and the "promote the new root,
+  then tombstone the rest" pattern stage 2 exists to use would both orphan a sibling permanently
+  and destroy the subtree it was meant to keep.
+- **`checkInvariants()` checks both directions**, and walks child chains itself. The reverse
+  direction (everything in a child list names that node as its parent) is what catches the
+  promote defect above; and the walk is bounds- and cycle-guarded because a checker whose job is
+  to describe a malformed history must not trap on one -- `children(of:)` subscripts each link
+  unchecked, so the first version of the reverse check bounds-tested indices it had already
+  dereferenced.
+- **A transaction records the rope the funnel was handed**, not a slice of the buffer taken
+  afterward. The two were byte-identical; the slice was half the cost of recording.
+
+**Performance.** 4.5's five new rows carry every figure and this record restates none of them.
+What belongs here is the finding behind the recording row rather than its numbers:
+**`Rope.slice`'s constant dominates the whole undo-recording path**. Measured at 1 MB, one
+one-byte slice costs an order more than both entry-set queries and the funnel call put together
+-- `slice` is two whole-tree splits (`Rope.swift:827`), O(log n) but with a per-level cost three
+orders above a descent. Removing the second of the two slices this path used to make roughly
+halved the cost of recording a transaction, and what remains is essentially one `Rope.slice`. A
+small-range fast path is a rope change with its own spec and is **not** M1.5's -- recorded here
+as the open item it is.
+
+**Mutation pass, run by the main conversation, 21 mutations plus three follow-ups.** 19 killed.
+Two survived, both correctly: `canUndo` spelled as `edits.isEmpty` (the spec predicted this --
+the two spellings are equivalent under 1.9's invariant), and **reversing
+`tombstoneSubtreePayload`'s clearing order, which the spec's mutation 14 claimed test 18a would
+kill**. It cannot: collection is a separate phase that completes before any link is cleared, so
+the clearing order cannot lose a node. The hazard the entry meant is a walk that clears links
+*before* collecting, and that mutation is killed by test 18a and the invariant check. Spec
+section 6 is corrected, including two other attributions that were true only after a review
+round rewrote the test they named: mutations 1 and 9 were credited to test 13, which as first
+written recomputed its own query ranges and never read what the production path recorded.
+
+**Eight cold review rounds after the gate was first green, and the trailing loop ran to a
+finding-free round.** Rounds 1-2 (sources, tests, in parallel) produced the entry-set and
+`promote` findings above. Round 3 found the unreachable bounds guard and two `try?`s that made
+an invariant check inert. Round 4 found fixtures whose "it throws" assertions proved nothing,
+because the fixture violated a second invariant as well, and `PLAN.md` prose implying a byte
+budget stage 1 does not enforce. Round 5 found the same improvements untested and an oracle
+citation whose marker half had never been run -- rerun in the main conversation and quoted
+literally. Round 6 traced that the discard perf fixture measured almost nothing, because an
+insertion over 64 bytes enters the rope as the caller's subtree and the history then shared
+nodes with the live text; the fixture now deletes what it inserts, and its *shape* is asserted,
+because its cost cannot defend it. Round 7 found four more copies of a superseded figure. Round
+8 found the new multi-chunk test comparing offsets while discarding bias and advance flags, with
+stronger helpers already in scope.
+
+**The round that ended the loop.** The last cold read found two figures in `undoPerfTests.swift`
+matching neither `PLAN.md`'s rows nor the raw runs behind them -- one of them two ranges in
+adjacent paragraphs, a draft a revision had failed to delete -- and pointed out that the gate log
+for the second watchdog timeout no longer exists, so no suite time can be quoted for it. All
+three were repaired by deleting the duplicated figures and narrowing the claim, which adds no new
+statement about the code; **this paragraph transcribing that round is the loop's terminator**,
+per `CLAUDE.md`'s base case. Ten rounds, and what ended it was changes made, not findings
+reported.
+
+**Declined, with the reason.** Round 6 proposed fixing `MainActorWatchdogTests`' starvation by
+dispatching `close()` onto a dedicated or high-QoS queue rather than widening its three
+semaphore deadlines to 60 s. A deadline margin is needed either way, the file belongs to another
+module and another milestone, and the change as made is documented with its measurements. Round
+8's correction to the mechanism is recorded and stands: a *high-QoS* dispatch is materially
+different from a same-QoS dedicated queue, since Darwin's scheduler does favour higher-QoS
+threads -- so the alternative would reduce the failure rate, it just would not remove the need
+for the margin. Worth doing when that module is next open; not worth opening it for.
+
+**The watchdog flake itself, since it cost a gate run.** `close() landing inside the publish
+window still stops the thread` timed out twice during this milestone's gate runs, both inside a
+`swift test --parallel` under heavy load. The gate log for the first of the two survives and
+gives its slowest suite at 247 s; the second is known from the agent report that hit it, whose
+own run log `dev/gate.sh` had already overwritten, so no suite time can be quoted for it -- a
+cold read asked for that distinction rather than one figure covering both. Evidence that it is starvation and
+not a product defect: run alone the suite is 0.70-0.75 s and was green 12 times out of 12, and
+the failing run took 5.775 s against a 5 s deadline. The deadlines are starvation margins, not
+speed assertions; a regression that really leaves the thread running still fails, just slowly.
+
+**A measurement that cost a wrong conclusion, and how it was caught.** The M1.4 interval
+differential went from 100 s to 247 s between two gate runs with nothing touching it, which
+looked like a regression this milestone had caused. A controlled A/B against a `git worktree` of
+`48b3239` measured the same test at 217/214 s on the *baseline* and 218/207 s on the working
+tree -- the machine had simply warmed up. `CLAUDE.md` already required the worktree baseline;
+this is the first time in this project that it changed the answer rather than confirming it.
+
+**Known gaps, all deliberate.**
+
+- **Stage 1 enforces no budget.** `undoByteBudget` is a field nothing reads until
+  `dev/specs/m1.5-stage2.md` gives it a reader, so a long session's history grows without limit.
+  Stage 2 is the pruning policy, written against the built structure with mutations run rather
+  than reasoned about -- 1.9 says why it is not written yet, and four consecutive review rounds
+  each finding a defect in the previous round's repair of that one section is the evidence.
+- **The budget's arithmetic is 2x off in bytes resident**, measured and recorded in 1.9 and in
+  4.5's memory row: the formula says ~190 B for a single-character transaction, the allocator
+  says 381-389 B, because an entry holds one or two small ropes whose fixed node cost dwarfs
+  their byte counts. The budget remains a cap on its own accounting; what is wrong is only the
+  translation to memory, and stage 2 starts from the measured number.
+- **Marker and interval creation and removal are not undoable**, matching GNU, with the oracle
+  in section 9. A traversal skips an id that is no longer present.
+- **`undo-in-region`, point restoration, `(apply ...)` entries, text-property entries and a
+  Lisp-visible `buffer-undo-list` are M5's**, and `(apply ...)` parity is unverified -- three
+  oracle attempts could not trigger either form, so the mechanism sketched for it is a sketch.
+- **Tombstoned slots are reclaimed only by `discardHistory()`**; compaction needs node ids that
+  survive renumbering, which is M5's generation counter.
+- **The ID high-water precondition cannot be reached by an in-process test.** A review round
+  showed no undo sequence can violate it, so the mutation the spec listed for it was withdrawn
+  rather than left standing as one nothing can kill.
 
 
 ## Icon, 2026-09-07 (out of milestone order, at the owner's request)
