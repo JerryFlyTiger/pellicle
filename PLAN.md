@@ -2774,7 +2774,16 @@ calls precede `edit`, so the count must not move) and the count did not move.
 `Sources/Text/IntervalTree.swift`, one new generic primitive in `SumTree.swift`, and the third
 field of `BufferSnapshot`, with `Tests/TextTests/intervalTreeTests.swift`,
 `intervalTreePerfTests.swift` and four `visitItems` tests in `sumTreeTests.swift`; spec in
-`dev/specs/m1.4.md`. Gate: `Test run with 178 tests in 19 suites passed`.
+`dev/specs/m1.4.md`. Gate: `Test run with 179 tests in 19 suites passed` -- *corrected
+2026-09-11 (M1.5 reconnaissance): this line and the handover both read 178. A clean-tree run at
+`48b3239` gives 179 planned (164 run, the rest skipped by the perf tag and the allocation
+probe's `.enabled(if:)`, which swift-testing still counts in the total). **The cause is not
+determinable from the history** and the first correction guessed at one: it said the 178
+predated a trailing round that added `largeResultOverlapQuery`, but `git log -S` puts that test
+in `08e7758` with the rest of M1.4's code, and `48b3239` touches only this file, so the test set
+is identical across both. What is verifiable is that the quoted line disagrees with a run of the
+tree it describes -- most likely captured mid-milestone and never re-run before the record was
+committed, which is a guess and is labelled as one.*
 
 **The design.** Intervals are ordered by start in a `SumTree<IntervalRecord>`, the start
 gap-encoded as `MarkerTree` does and the extent stored as a **length**, so an interval entirely
@@ -3394,12 +3403,79 @@ an explanation of a mechanism for work that was never done. Each was fixed by de
 rather than by getting it right on the next try. The general form, for whoever writes the
 next record: *a claim that no decision depends on is not evidence, it is a standing
 opportunity to be wrong* -- and a mechanism you have not built is exactly that kind of
-claim. The final round found nothing to change; its predecessor's one open item, that "do
-not reason about its scope from anything written here" sits oddly beside three scope
-observations, is recorded and not acted on -- the sentence after it already says they are
-observations and not a rule.
+claim. The final round found nothing to change; its predecessor's one open item, that "do not
+reason about its scope from anything written here" sits oddly beside three scope observations,
+is recorded and not acted on -- the sentence after it already says they are observations and not
+a rule.
 
 ---
+
+## Handover: how to resume, updated 2026-09-11 (M1.5 spec complete, not implemented)
+
+**Read this first, then start.** `CLAUDE.md`, then `dev/specs/m1.5.md`, which is the whole
+briefing for the work in flight. Do not re-read `PLAN.md` whole. **No line counts, diff sizes or
+measured figures are restated here** -- a cold read of the first draft of this section found
+three of them already wrong or drifting, which is the failure this file documents at length; the
+spec holds each number once and this section points at it.
+
+- **State**: M0 through M1.4 are done with records in section 11. The gate is green on a clean
+  tree at `48b3239` (`Test run with 179 tests in 19 suites passed`; the M1.4 record's 178
+  disagrees with a clean-tree run of the very tree it describes, the cause is not determinable
+  from the history, and both copies are corrected in this working tree). **Nothing of M1.5 is
+  implemented.** The spec and this section are committed; nothing else is in flight.
+- **What exists for M1.5**: a reconnaissance pass (the edit funnel, a GNU Emacs 30.2 undo oracle
+  harvest, Reticle's undo implementation, this project's verification conventions), an architect
+  pass that settled six design questions with measurements taken in an isolated worktree, and
+  **seven waves of cold review on the spec -- eleven reviewer dispatches, one of which died on
+  an output-token limit having written nothing and was re-sent as two narrower ones.** Every
+  finding is written into the spec at the point it applies, with "a review round found..."
+  saying why the text is the way it is, so the spec is self-contained and the scratchpad copies
+  of the review records are disposable. A first draft of this section said "nine rounds" and a
+  cold read could not confirm it; this is the countable version.
+- **Where the review loop stopped, and why that is the terminator.** The final wave's two
+  reviewers found a dangling test reference, deliverables filed under the wrong stage, three
+  self-referential counts in this section that were wrong, a too-wide restatement of a measured
+  range, an unfounded causal claim about the M1.4 test count, and one unhandled contradiction
+  with the older handover below. Acting on those produced **mechanical repairs only** -- a test
+  reference repointed, deliverables re-lettered and re-staged, two wording softenings, one
+  fixture clause, and the deletion of the numbers named above -- **making no new design claim,
+  which is what ends the loop.** That batch is `git show` on the spec commit; if you judge
+  otherwise, it is the batch to send.
+- **What the spec decided that 4.5 still contradicts.** 4.5's undo bullet is wrong in three of
+  its four clauses and the spec's section 5 lists the edits: there is **no 300 ms window** (the
+  oracle shows command identity plus a count of 20 plus a fixed 10-second safety-net timer, and
+  Reticle used a character count -- the 300 ms figure was pellicle's own invention recorded as a
+  port), there are **no retained snapshot checkpoints** (the spec's 1.1 carries the measured
+  per-transaction cost of each representation with the fixture it was measured on -- a cold read
+  caught this section restating that range too widely and dropping the fixture, so it is not
+  restated here -- and the decisive argument is not the ratio anyway but that restoring a
+  snapshot un-creates every marker and interval made since, which GNU never does), and grouping
+  by command is M5's policy over M1.5's mechanism. Native branches survive, and an undo-tree UI
+  being a view is strengthened.
+- **Two stages, and the second one's spec is deliberately not written yet.** Stage 1 is the
+  representation and its correctness. Stage 2 is the pruning policy, and it gets
+  `dev/specs/m1.5-stage2.md` written against the built structure with mutations actually run.
+  Four consecutive review rounds each found a real defect in the previous round's repair of that
+  one section, every one of them there and nowhere else in the spec; it is the only part of M1.5
+  with no oracle, no measurement and no precedent in the tree to check a draft against. 1.9
+  lists what stage 2 inherits as settled and what stage 1 builds for it. `m1.1b-stage2.md` is
+  the precedent.
+- **The older handover below is stale about this, deliberately left in place.** The M1.4 section
+  still describes M1.5 as "300 ms window ... edit logs plus retained snapshot checkpoints",
+  which is what M1.5's spec overturned. Old handovers are kept as written rather than edited, so
+  read this section and not that one; a cold read caught the first draft of this bullet
+  addressing only 4.5 and not the neighbour.
+- **How to run it**: the eight-step loop in `CLAUDE.md`, starting at **step 3 (implementer)**
+  for stage 1. The spec's section 7 carries the fixed clauses and its section 2 the file scope
+  and the deliverables A-K; the ID migration is its own commit.
+- **The lesson this spec paid seven waves for, and it is the same one as M1.3's and M1.4's.** A
+  test named in a spec as the one that catches a mutation is a hypothesis until the mutation is
+  run -- and a *spec* claim is a hypothesis until something checks it. The reviews found two
+  cells of a seven-row case table wrong, a named test that a concrete counterexample showed was
+  blind, a mutation whose kill scenario was unreachable, an API assumption that cannot be
+  implemented (`removing` traps rather than skipping), and a silent regression no test could see
+  (re-insertion reverses a tie group). None of that would have been cheaper to find in code.
+
 
 ## Handover: how to resume, updated 2026-09-11 (M1.4)
 
@@ -3407,7 +3483,7 @@ observations and not a rule.
 briefing; nothing else needs reading to begin, and `PLAN.md` must not be read whole.
 
 - **State**: M0, M1.1, both stages of M1.1b, M1.2, M1.3 and **M1.4** are done, each with a
-  record in section 11. The gate is green (`Test run with 178 tests in 19 suites passed`, plus
+  record in section 11. The gate is green (`Test run with 179 tests in 19 suites passed`, plus
   the isolated allocation probe `dev/gate.sh` now runs after it). Working tree clean.
 - **Next work item**: **M1.5**, undo -- transaction-based, grouped by command and by a 300 ms
   window, edit logs plus retained snapshot checkpoints, branches native so an undo-tree UI is a
