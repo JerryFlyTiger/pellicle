@@ -12,29 +12,34 @@
 /// to remember a second call with the same arguments, and that desync is silent and
 /// position-dependent.
 ///
-/// **Not `TextBuffer` yet.** `PLAN.md` 4.5 sketches it as a class with `overlays`, `history`
-/// and `clock` — three fields that do not exist yet. A value type with a `mutating` edit
-/// gives atomicity without inventing an ownership model before there is an owner. No
-/// `clock`/`version` field either: nothing would read it yet, and an unread field is a
-/// standing chance to be wrong (M1.5 adds it with its first consumer).
+/// **Not `TextBuffer` yet.** `dev/specs/m1.5.md` 1.8 gives `TextBuffer` its final shape: a
+/// `final class` that owns `snapshot`, `history` and the two ID counters — this type stays
+/// the value the UI and background readers see, and its `mutating` edit gives atomicity
+/// without an ownership model.
 ///
-/// The monotone marker-ID counter lives here, not on `MarkerTree`, because a `MarkerTree` is
-/// a value with no notion of "the next ID this buffer has not yet handed out" — forking a
-/// snapshot and editing both branches reuses IDs (`MarkerTree.swift`'s known-gaps list; M1.5's
-/// branching undo is the milestone that must decide the allocation story).
+/// **The ID counters are `TextBuffer`'s, not this type's** (`dev/specs/m1.5.md` 1.8).
+/// `BufferSnapshot` is a value; a fork-and-edit-both-branches scenario would let two callers
+/// derive a counter from the same starting point and collide, so allocation is the identity-
+/// bearing owner's job. What this type keeps instead is a **high-water pair it can only
+/// raise**: `createMarker`/`createInterval` take the id and precondition it exceeds the
+/// high-water mark, turning a caller's collision into a trap rather than a silent corruption.
+/// There is still no `init(text:markers:)` for the same reason as before, plus one more: it
+/// would also have to fabricate a high-water mark, and `TextBuffer`'s own contract (1.8 rule
+/// 4) is that no initialiser builds a buffer around an existing snapshot for exactly this
+/// reason.
 package struct BufferSnapshot: Sendable {
     package private(set) var text: Rope
     package private(set) var markers: MarkerTree
     package private(set) var intervals: IntervalTree
-    private var nextMarkerID: MarkerID
-    private var nextIntervalID: IntervalID
+    private var markerIDHighWater: MarkerID?
+    private var intervalIDHighWater: IntervalID?
 
     package init() {
         self.text = Rope()
         self.markers = MarkerTree()
         self.intervals = IntervalTree()
-        self.nextMarkerID = 0
-        self.nextIntervalID = 0
+        self.markerIDHighWater = nil
+        self.intervalIDHighWater = nil
     }
 
     // No `init(text:markers:)`. It would have to fabricate `nextMarkerID` (colliding with
@@ -78,29 +83,34 @@ package struct BufferSnapshot: Sendable {
         replaceSubrange(byteRange, with: Rope(string), insertBeforeMarkers: insertBeforeMarkers)
     }
 
-    /// Creates a new marker at `atByteOffset`, preconditioning the offset is a scalar
+    /// Creates a new marker `id` at `atByteOffset`, preconditioning the offset is a scalar
     /// boundary via `Rope.isScalarBoundary` — the check `MarkerTree` alone cannot do, since
-    /// it does not hold the text (`dev/specs/m1.3.md` section 2.C). Returns the fresh,
-    /// never-reused id.
-    package mutating func createMarker(atByteOffset byteOffset: Int, bias: MarkerBias) -> MarkerID {
+    /// it does not hold the text (`dev/specs/m1.3.md` section 2.C) — and that `id` exceeds
+    /// the high-water mark (`dev/specs/m1.5.md` 1.8 rule 3). Allocation is the caller's
+    /// (`TextBuffer`'s); this only validates and inserts.
+    package mutating func createMarker(id: MarkerID, atByteOffset byteOffset: Int, bias: MarkerBias)
+    {
         precondition(
             byteOffset >= 0 && byteOffset <= text.utf8Count,
             "BufferSnapshot.createMarker: byte offset out of range")
         precondition(
             text.isScalarBoundary(byteOffset),
             "BufferSnapshot.createMarker: byte offset \(byteOffset) is not a scalar boundary")
-        let id = nextMarkerID
-        nextMarkerID += 1
+        precondition(
+            markerIDHighWater.map { id > $0 } ?? true,
+            "BufferSnapshot.createMarker: id \(id) does not exceed the high-water mark \(String(describing: markerIDHighWater))"
+        )
+        markerIDHighWater = id
         markers = markers.inserting(byteOffset: byteOffset, bias: bias, id: id)
-        return id
     }
 
-    /// Creates a new interval spanning `byteRange`, preconditioning both endpoints are in
-    /// range and on scalar boundaries via `Rope.isScalarBoundary` — exactly as `createMarker`
-    /// does (`dev/specs/m1.4.md` deliverable D). Returns the fresh, never-reused id.
+    /// Creates a new interval `id` spanning `byteRange`, preconditioning both endpoints are
+    /// in range and on scalar boundaries via `Rope.isScalarBoundary` — exactly as
+    /// `createMarker` does (`dev/specs/m1.4.md` deliverable D) — and that `id` exceeds the
+    /// high-water mark, mirroring `createMarker`'s own rule.
     package mutating func createInterval(
-        byteRange: Range<Int>, frontAdvance: Bool = false, rearAdvance: Bool = false
-    ) -> IntervalID {
+        id: IntervalID, byteRange: Range<Int>, frontAdvance: Bool = false, rearAdvance: Bool = false
+    ) {
         precondition(
             byteRange.lowerBound >= 0 && byteRange.upperBound <= text.utf8Count,
             "BufferSnapshot.createInterval: byte range out of range")
@@ -112,11 +122,13 @@ package struct BufferSnapshot: Sendable {
             text.isScalarBoundary(byteRange.upperBound),
             "BufferSnapshot.createInterval: upper bound \(byteRange.upperBound) is not a scalar boundary"
         )
-        let id = nextIntervalID
-        nextIntervalID += 1
+        precondition(
+            intervalIDHighWater.map { id > $0 } ?? true,
+            "BufferSnapshot.createInterval: id \(id) does not exceed the high-water mark \(String(describing: intervalIDHighWater))"
+        )
+        intervalIDHighWater = id
         intervals = intervals.inserting(
             range: byteRange, id: id, frontAdvance: frontAdvance, rearAdvance: rearAdvance)
-        return id
     }
 
     /// Every interval overlapping `byteRange`, under GNU's `overlays-in` rule
@@ -130,5 +142,54 @@ package struct BufferSnapshot: Sendable {
             overlapping: byteRange,
             includingEmptyAtUpperBound: byteRange.isEmpty
                 || byteRange.upperBound == text.utf8Count)
+    }
+
+    // MARK: - Undo replay primitives (`dev/specs/m1.5.md` 1.4)
+
+    /// Removes marker `id` at `byteOffset` if present, doing nothing otherwise — `TextBuffer`
+    /// undo/redo's step 1, "an id that is not present is skipped, not a trap" (marker
+    /// *removal* is not undoable, so a branch walked after the user deleted one of these must
+    /// not crash). Bypasses `createMarker`'s high-water precondition entirely, on purpose:
+    /// this re-inserts an id that already exists, through `MarkerTree.inserting` directly,
+    /// never through the checked creation path (`dev/specs/m1.5.md` mutation 10's withdrawal
+    /// note explains why no undo sequence can make that unsafe).
+    @discardableResult
+    package mutating func removeMarkerIfPresent(id: MarkerID, atByteOffset byteOffset: Int) -> Bool
+    {
+        guard let updated = markers.removingIfPresent(id: id, atByteOffset: byteOffset) else {
+            return false
+        }
+        markers = updated
+        return true
+    }
+
+    /// Re-inserts a marker at a **recorded** position (`dev/specs/m1.5.md` 1.4 step 3) — the
+    /// replay counterpart to `removeMarkerIfPresent`, going straight to `MarkerTree.inserting`
+    /// rather than `createMarker`, since the id already exists and must not be validated
+    /// against the high-water mark again.
+    package mutating func insertMarker(id: MarkerID, atByteOffset byteOffset: Int, bias: MarkerBias)
+    {
+        markers = markers.inserting(byteOffset: byteOffset, bias: bias, id: id)
+    }
+
+    /// Removes interval `id` starting at `byteOffset` if present, mirroring
+    /// `removeMarkerIfPresent`.
+    @discardableResult
+    package mutating func removeIntervalIfPresent(id: IntervalID, startingAt byteOffset: Int)
+        -> Bool
+    {
+        guard let updated = intervals.removingIfPresent(id: id, startingAt: byteOffset) else {
+            return false
+        }
+        intervals = updated
+        return true
+    }
+
+    /// Re-inserts an interval at a recorded span, mirroring `insertMarker`.
+    package mutating func insertInterval(
+        id: IntervalID, range: Range<Int>, frontAdvance: Bool, rearAdvance: Bool
+    ) {
+        intervals = intervals.inserting(
+            range: range, id: id, frontAdvance: frontAdvance, rearAdvance: rearAdvance)
     }
 }

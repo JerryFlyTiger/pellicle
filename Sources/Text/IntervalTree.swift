@@ -237,8 +237,11 @@ package struct IntervalTree: Sendable {
     /// The order statistic: the rank of the first interval whose start is `>= x`, or `count`
     /// when nothing qualifies. Guarded exactly as `MarkerTree.rank(atOrAfterKey:)` is (its own
     /// doc comment explains why the `count > 0` clause is needed to avoid tripping `find`'s
-    /// `predicate(.identity)` precondition at `x == 0`).
-    private func rank(startAtOrAfter x: Int) -> Int {
+    /// `predicate(.identity)` precondition at `x == 0`). **`package`, not `private`**
+    /// (`dev/specs/m1.5.md` deliverable E): the undo entry-set query below is built from this
+    /// plus `endAtOrAfterDescendPredicate` (already `internal`), and a test wraps the real
+    /// function rather than copying it, per this module's standing convention.
+    package func rank(startAtOrAfter x: Int) -> Int {
         guard let (_, itemPrefix) = tree.find(where: { $0.count > 0 && $0.span >= x }) else {
             return count
         }
@@ -393,6 +396,137 @@ package struct IntervalTree: Sendable {
             .filter { !$0.range.isEmpty }
     }
 
+    // MARK: - Undo entry-set query (`dev/specs/m1.5.md` 1.3-1.4)
+
+    /// Every interval with an endpoint in the closed `[lo, upperInclusive]` — the set an undo
+    /// traversal must remove-then-reinsert around a live edit, derived in `dev/specs/m1.5.md`
+    /// 1.3. Two independent pieces, both reusing existing machinery rather than a new
+    /// traversal:
+    ///
+    /// - **Starts in `[lo, upperInclusive]`** — a rank-contiguous range via
+    ///   `rank(startAtOrAfter:)`, walked exactly as `intervals(overlapping:
+    ///   includingEmptyAtUpperBound:)`'s piece 1 already does.
+    /// - **Ends at or after `lo`, among intervals starting before `lo`** — the same
+    ///   non-strict `visitEndAtOrAfterInclusive` search `applyInsert` uses, restricted to the
+    ///   rank prefix before the first piece's start.
+    ///
+    /// This is deliberately a **superset** of the rows 1.3 derives as needing an entry (it
+    /// also returns row 4's containers, whose position is unaffected by the edit and so need
+    /// no entry either way — 1.3 explains why a superset is the safe direction here, unlike
+    /// the marker case where the two-query shape already matches exactly).
+    ///
+    /// **The second piece needs a per-item filter, and its qualifying starts need
+    /// tie-group closure — a fix round found both missing.** `visitEndAtOrAfterInclusive`'s
+    /// prune (`endAtOrAfterDescendPredicate`) is subtree/leaf granularity
+    /// (`prefix.span + subtree.maxEnd >= p`); `SumTree.visitNode`'s leaf case then calls
+    /// `visit` for **every item in that leaf**, so without a per-item `end >= lo` guard the
+    /// entry set depends on B+-tree leaf packing — measured on this machine, a 200-byte
+    /// buffer with 40 one-byte intervals plus one straddler recorded ids `[34...40]` for an
+    /// edit whose only qualifying end was `40`, purely because those six shared a leaf with
+    /// it. Filtering alone is not enough either: two intervals can share a start below `lo`
+    /// while differing in end, so one qualifies for the end search and the other does not —
+    /// 1.4 step 3's "the whole tie group is always inside the entry set" argument is written
+    /// for markers and is false here, and without closure the survivor stays in the tree
+    /// while the reinserted one is prepended in front of it, silently reversing tie order on
+    /// undo (measured: two intervals sharing start `0`, `undoEntrySet` returning only the
+    /// one found by the end search, reversed the pair's order after an undo). So this piece
+    /// walks in two steps: filter the end search's items to `absoluteStart + item.length >=
+    /// lo`, collect the **distinct starts** it names (in the order found — ascending, since
+    /// the walk is in rank order), then for each such start pull the **whole** tie group via
+    /// `rank(startAtOrAfter:)`/`rank(startAtOrAfter: start + 1)`, the same rank-window walk
+    /// piece 1 already does. **The cost is O(v + g log n + G)**, where `v` is the items the
+    /// pruned end search visits — the `e` term this file's header already names for
+    /// `applyInsert`, and what the leaf-packing measurement above is about, since a leaf that
+    /// passes the prune is visited whole — `g` is the distinct qualifying starts that search
+    /// names, and `G` the items in their tie groups. (`v`, not `m`: this file already spends
+    /// `m` on a tie group's size in `removing`'s cost note, and `PLAN.md` spends it on the tie
+    /// group at an insertion point.) Per start: two rank searches and a fresh cursor
+    /// descent per start, plus one step per item returned. A review round caught an earlier
+    /// version of this sentence stating only the closure loop's `g log n + G` as though it
+    /// were the whole piece's cost. It is *not* the single tie group `applyInsert` pays for at its
+    /// one insertion point — a review round caught this comment claiming that equivalence, and
+    /// `g` is not bounded by one: `N` intervals with distinct starts all ending at the same
+    /// offset make every one of them a qualifying start for an edit at that offset.
+    ///
+    /// **Order**: the two pieces cannot tie with each other — the second piece's items all
+    /// have `start < lo` strictly (it is restricted to ranks before the first piece's start),
+    /// so no reinserted item from one piece shares a key with one from the other. Within the
+    /// first piece, and within each tie group the second piece closes over, the walk is in
+    /// the tree's own rank order, which is what `dev/specs/m1.5.md` 1.4 step 3's
+    /// reverse-iteration reinsertion needs to reconstruct a tie group exactly.
+    ///
+    /// **Stability across the edit**, so the before- and after-queries return the same id set
+    /// (test 13's invariant): every group this closes over has a start `< lo`, and both the
+    /// marker and interval delete/insert rules leave starts below `lo` untouched and never
+    /// move a start from `>= lo` to `< lo` — so a group at a given `s < lo` has the same
+    /// membership whether queried before or after the edit.
+    package func undoEntrySet(lo: Int, upperInclusive: Int) -> [IntervalSpan] {
+        precondition(
+            lo <= upperInclusive, "IntervalTree.undoEntrySet: lo must be <= upperInclusive")
+        var results: [IntervalSpan] = []
+        var seenIDs: Set<IntervalID> = []
+
+        let startRank = rank(startAtOrAfter: lo)
+        let endRankExclusive = rank(startAtOrAfter: upperInclusive + 1)
+        if startRank < endRankExclusive {
+            var cursor = tree.makeCursor()
+            cursor.seek(where: { $0.count > startRank })
+            var absoluteStart = start(ofRank: startRank)
+            var isFirstItem = true
+            var r = startRank
+            while r < endRankExclusive, let item = cursor.next() {
+                if !isFirstItem {
+                    absoluteStart += item.gap
+                }
+                isFirstItem = false
+                results.append(
+                    IntervalSpan(
+                        range: absoluteStart..<(absoluteStart + item.length), id: item.id,
+                        frontAdvance: item.frontAdvance, rearAdvance: item.rearAdvance))
+                seenIDs.insert(item.id)
+                r += 1
+            }
+        }
+
+        if startRank > 0 {
+            var qualifyingStarts: [Int] = []
+            var seenStarts: Set<Int> = []
+            visitEndAtOrAfterInclusive(upperRankExclusive: startRank, p: lo) {
+                _, absoluteStart, item in
+                guard absoluteStart + item.length >= lo else { return }
+                guard !seenStarts.contains(absoluteStart) else { return }
+                seenStarts.insert(absoluteStart)
+                qualifyingStarts.append(absoluteStart)
+            }
+            for s in qualifyingStarts {
+                let groupStartRank = rank(startAtOrAfter: s)
+                let groupEndRankExclusive = rank(startAtOrAfter: s + 1)
+                guard groupStartRank < groupEndRankExclusive else { continue }
+                var cursor = tree.makeCursor()
+                cursor.seek(where: { $0.count > groupStartRank })
+                var absoluteStart = start(ofRank: groupStartRank)
+                var isFirstItem = true
+                var r = groupStartRank
+                while r < groupEndRankExclusive, let item = cursor.next() {
+                    if !isFirstItem {
+                        absoluteStart += item.gap
+                    }
+                    isFirstItem = false
+                    if !seenIDs.contains(item.id) {
+                        results.append(
+                            IntervalSpan(
+                                range: absoluteStart..<(absoluteStart + item.length), id: item.id,
+                                frontAdvance: item.frontAdvance, rearAdvance: item.rearAdvance))
+                        seenIDs.insert(item.id)
+                    }
+                    r += 1
+                }
+            }
+        }
+
+        return results
+    }
+
     // MARK: - Insert/remove
 
     /// Inserts one new interval among the existing ones — not an edit (nothing else moves).
@@ -440,12 +574,23 @@ package struct IntervalTree: Sendable {
     /// and made this O(m log n) for a tie group of size `m` (see the implementer's fix-round
     /// report; the same shape as the O(k log n) bug the overlap query's piece 1/3 had).
     package func removing(id targetID: IntervalID, startingAt byteOffset: Int) -> IntervalTree {
-        let firstRank = rank(startAtOrAfter: byteOffset)
-        guard firstRank < count else {
+        guard let result = removingIfPresent(id: targetID, startingAt: byteOffset) else {
             preconditionFailure(
                 "IntervalTree.removing: no interval with id \(targetID) starting at \(byteOffset)"
             )
         }
+        return result
+    }
+
+    /// Like `removing(id:startingAt:)`, but returns `nil` instead of trapping when no
+    /// interval with `targetID` starts at `byteOffset` — mirroring
+    /// `MarkerTree.removingIfPresent(id:atByteOffset:)` for the same reason (`dev/specs/
+    /// m1.5.md` 1.4 step 1).
+    package func removingIfPresent(id targetID: IntervalID, startingAt byteOffset: Int)
+        -> IntervalTree?
+    {
+        let firstRank = rank(startAtOrAfter: byteOffset)
+        guard firstRank < count else { return nil }
         var cursor = tree.makeCursor()
         cursor.seek(where: { $0.count > firstRank })
         var absoluteStart = start(ofRank: firstRank)
@@ -462,8 +607,7 @@ package struct IntervalTree: Sendable {
             }
             r += 1
         }
-        preconditionFailure(
-            "IntervalTree.removing: no interval with id \(targetID) starting at \(byteOffset)")
+        return nil
     }
 
     private func removingAtRank(_ r: Int) -> IntervalTree {
@@ -652,11 +796,15 @@ package struct IntervalTree: Sendable {
         let d = hi - lo
 
         // Straddlers: start <= lo < end, found in the rank prefix before the first interval
-        // starting at lo. (An interval starting exactly at lo with end > lo is a straddler
-        // too, by this same predicate — `start <= lo` at equality — so it must not also be
-        // picked up by the collapse group below; the collapse group's rank range starts at
-        // `rank(startAtOrAfter: lo)` inclusive of a start-at-lo item, so straddlers are
-        // handled first, against the *original* tree, before the collapse group is touched.)
+        // starting at lo. (Correction, `dev/specs/m1.5.md` 1.3: an earlier version of this
+        // comment claimed an interval starting exactly at lo with end > lo "is a straddler
+        // too, by this same predicate ... so it must not also be picked up by the collapse
+        // group below." Both halves were misleading. `rank(startAtOrAfter: lo)` returns the
+        // rank of the first item whose start is `>= lo`, and the straddler walk below is
+        // restricted to ranks strictly below it, so a start-at-lo item is *excluded* from
+        // this straddler stage and the collapse group is its only handler — which is exactly
+        // why its length is cut once, not twice. The code has always been correct; the old
+        // comment's stated reason did not establish what it claimed.)
         let firstAtOrAfterLoRank = rank(startAtOrAfter: lo)
         var straddlerRanks: [(rank: Int, newLength: Int)] = []
         if firstAtOrAfterLoRank > 0 {

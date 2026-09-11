@@ -322,8 +322,24 @@ package struct MarkerTree: Sendable {
     /// the key), so locating the one to remove needs only a linear scan across the (usually
     /// tiny) tie group at that offset, not a second coordinate. Traps if no marker with that
     /// id sits at that offset — a caller mismatching the two is a programmer error, the same
-    /// convention `Rope`'s own offset preconditions use throughout this module.
+    /// convention `Rope`'s own offset preconditions use throughout this module. Implemented
+    /// as `removingIfPresent` plus the trap, so the tie-group search exists once
+    /// (`dev/specs/m1.5.md` deliverable E).
     package func removing(id targetID: MarkerID, atByteOffset byteOffset: Int) -> MarkerTree {
+        guard let result = removingIfPresent(id: targetID, atByteOffset: byteOffset) else {
+            preconditionFailure(
+                "MarkerTree.removing: no marker with id \(targetID) at byte offset \(byteOffset)")
+        }
+        return result
+    }
+
+    /// Like `removing(id:atByteOffset:)`, but returns `nil` instead of trapping when no
+    /// marker with `targetID` sits at `byteOffset` (`dev/specs/m1.5.md` 1.4 step 1: a
+    /// traversal that walks a branch after the user removed one of the entry set's markers
+    /// must skip it, not crash — marker removal is itself not undoable).
+    package func removingIfPresent(id targetID: MarkerID, atByteOffset byteOffset: Int)
+        -> MarkerTree?
+    {
         var r = rank(atOrAfterKey: 2 * byteOffset)
         while r < count, position(ofRank: r) == byteOffset {
             if id(ofRank: r) == targetID {
@@ -331,8 +347,7 @@ package struct MarkerTree: Sendable {
             }
             r += 1
         }
-        preconditionFailure(
-            "MarkerTree.removing: no marker with id \(targetID) at byte offset \(byteOffset)")
+        return nil
     }
 
     private func removingAtRank(_ r: Int) -> MarkerTree {

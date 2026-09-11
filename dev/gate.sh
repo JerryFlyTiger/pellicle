@@ -48,6 +48,32 @@ if ! grep -q "Test run with 1 test .* passed" .build/alloc-probe.log ||
     exit 1
 fi
 
+# M1.5 stage 1's own retained-transaction memory probe (`dev/specs/m1.5.md` 4.3 test 22)
+# has the same whole-process contamination hazard as the allocation probe above, for the
+# same reason (`malloc_zone_statistics` counts the entire process): under `swift test
+# --parallel` every other suite's concurrent allocation traffic lands in this window too.
+# It is additionally a `.performance`-tagged test (`UndoPerfTests`), so it needs `-c
+# release` and `PELLICLE_PERF=1` as well as `PELLICLE_ALLOC_PROBE=1` to run at all — the
+# `cursorTraversalAllocatesNothing` stage above needs neither, since it is not
+# `.performance`-tagged.
+echo "==> swift test -c release --filter memoryPerRetainedTransaction (alone; whole-process counter)"
+PELLICLE_PERF=1 PELLICLE_ALLOC_PROBE=1 swift test -c release --filter memoryPerRetainedTransaction 2>&1 |
+    tee .build/undo-alloc-probe.log
+
+# The same two load-bearing clauses as the allocation probe above, matched to this test's
+# own name and count (`dev/specs/m1.5.md` 4.3 test 22: "its two load-bearing grep clauses
+# ... must cover it too, or a silently skipped probe passes the gate"). Without the first,
+# a filter matching more than this one test would still exit 0 as long as this test's own
+# "passed" line is present; without the second, a skipped probe -- filter typo, env var
+# unset -- would still print "Test run with 1 test in 1 suite passed" and exit 0.
+if ! grep -q "Test run with 1 test .* passed" .build/undo-alloc-probe.log ||
+    ! grep -q 'Test "memory per retained transaction" passed' .build/undo-alloc-probe.log; then
+    echo "==> gate.sh: the undo memory-per-transaction probe did not run and pass -- the"
+    echo "    filter selected other than exactly this one test, or the test was skipped, or"
+    echo "    it ran and failed; the numbers are in .build/undo-alloc-probe.log"
+    exit 1
+fi
+
 if grep -q "Test run with 0 tests" .build/test.log; then
     echo "==> gate.sh: swift test reported zero tests — see .build/test.log"
     exit 1

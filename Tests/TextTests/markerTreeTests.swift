@@ -47,8 +47,10 @@ struct MarkerTreeTests {
     func oracleInsertAtMarker() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdef")
-        let mNil = buffer.createMarker(atByteOffset: 2, bias: .left)
-        let mT = buffer.createMarker(atByteOffset: 2, bias: .right)
+        let mNil: MarkerID = 0
+        buffer.createMarker(id: mNil, atByteOffset: 2, bias: .left)
+        let mT: MarkerID = 1
+        buffer.createMarker(id: mT, atByteOffset: 2, bias: .right)
         buffer.replaceSubrange(2..<2, with: "XY")
         #expect(buffer.text.toString() == "abXYcdef")
         #expect(buffer.markers.rankPosition(of: mNil) == 2)
@@ -71,7 +73,8 @@ struct MarkerTreeTests {
     func oracleInsertBefore() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdef")
-        let m = buffer.createMarker(atByteOffset: 3, bias: .left)
+        let m: MarkerID = 0
+        buffer.createMarker(id: m, atByteOffset: 3, bias: .left)
         buffer.replaceSubrange(1..<1, with: "ZZ")
         #expect(buffer.text.toString() == "aZZbcdef")
         #expect(buffer.markers.rankPosition(of: m) == 5)
@@ -92,7 +95,8 @@ struct MarkerTreeTests {
     func oracleMarkerInsideDel() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdefgh")
-        let m = buffer.createMarker(atByteOffset: 3, bias: .left)
+        let m: MarkerID = 0
+        buffer.createMarker(id: m, atByteOffset: 3, bias: .left)
         buffer.replaceSubrange(2..<5, with: "")
         #expect(buffer.text.toString() == "abfgh")
         #expect(buffer.markers.rankPosition(of: m) == 2)
@@ -115,9 +119,12 @@ struct MarkerTreeTests {
     func oracleMarkerAtBounds() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdefgh")
-        let mLo = buffer.createMarker(atByteOffset: 2, bias: .left)
-        let mHi = buffer.createMarker(atByteOffset: 5, bias: .left)
-        let mAfter = buffer.createMarker(atByteOffset: 6, bias: .left)
+        let mLo: MarkerID = 0
+        buffer.createMarker(id: mLo, atByteOffset: 2, bias: .left)
+        let mHi: MarkerID = 1
+        buffer.createMarker(id: mHi, atByteOffset: 5, bias: .left)
+        let mAfter: MarkerID = 2
+        buffer.createMarker(id: mAfter, atByteOffset: 6, bias: .left)
         buffer.replaceSubrange(2..<5, with: "")
         #expect(buffer.text.toString() == "abfgh")
         #expect(buffer.markers.rankPosition(of: mLo) == 2)
@@ -143,9 +150,12 @@ struct MarkerTreeTests {
     func oracleDelWithTypeT() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdefgh")
-        let mLo = buffer.createMarker(atByteOffset: 2, bias: .right)
-        let mInside = buffer.createMarker(atByteOffset: 3, bias: .right)
-        let mHi = buffer.createMarker(atByteOffset: 5, bias: .right)
+        let mLo: MarkerID = 0
+        buffer.createMarker(id: mLo, atByteOffset: 2, bias: .right)
+        let mInside: MarkerID = 1
+        buffer.createMarker(id: mInside, atByteOffset: 3, bias: .right)
+        let mHi: MarkerID = 2
+        buffer.createMarker(id: mHi, atByteOffset: 5, bias: .right)
         buffer.replaceSubrange(2..<5, with: "")
         #expect(buffer.text.toString() == "abfgh")
         #expect(buffer.markers.rankPosition(of: mLo) == 2)
@@ -172,8 +182,10 @@ struct MarkerTreeTests {
     func oracleReplaceAtMarker() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdefgh")
-        let mNil = buffer.createMarker(atByteOffset: 2, bias: .left)
-        let mT = buffer.createMarker(atByteOffset: 2, bias: .right)
+        let mNil: MarkerID = 0
+        buffer.createMarker(id: mNil, atByteOffset: 2, bias: .left)
+        let mT: MarkerID = 1
+        buffer.createMarker(id: mT, atByteOffset: 2, bias: .right)
         buffer.replaceSubrange(2..<5, with: "WXYZ")
         #expect(buffer.text.toString() == "abWXYZfgh")
         #expect(buffer.markers.rankPosition(of: mNil) == 2)
@@ -198,7 +210,8 @@ struct MarkerTreeTests {
     func insideDelTypeTPushedByLaterInsert() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdefgh")
-        let m = buffer.createMarker(atByteOffset: 3, bias: .right)
+        let m: MarkerID = 0
+        buffer.createMarker(id: m, atByteOffset: 3, bias: .right)
         buffer.replaceSubrange(2..<5, with: "WXYZ")
         #expect(buffer.text.toString() == "abWXYZfgh")
         #expect(buffer.markers.rankPosition(of: m) == 6)
@@ -213,7 +226,8 @@ struct MarkerTreeTests {
     func oracleDefaultTypes() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "a")
-        let m = buffer.createMarker(atByteOffset: 0, bias: .left)
+        let m: MarkerID = 0
+        buffer.createMarker(id: m, atByteOffset: 0, bias: .left)
         #expect(buffer.markers.rankBias(of: m) == .left)
     }
 
@@ -232,8 +246,10 @@ struct MarkerTreeTests {
     func oracleInsertBeforeMarkers() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdef")
-        let mNil = buffer.createMarker(atByteOffset: 2, bias: .left)
-        let mT = buffer.createMarker(atByteOffset: 2, bias: .right)
+        let mNil: MarkerID = 0
+        buffer.createMarker(id: mNil, atByteOffset: 2, bias: .left)
+        let mT: MarkerID = 1
+        buffer.createMarker(id: mT, atByteOffset: 2, bias: .right)
         buffer.replaceSubrange(2..<2, with: "XY", insertBeforeMarkers: true)
         #expect(buffer.markers.rankPosition(of: mNil) == 4)
         #expect(buffer.markers.rankPosition(of: mT) == 4)
@@ -255,9 +271,12 @@ struct MarkerTreeTests {
     func oracleAtPointMax() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abc")
-        let mMaxNil = buffer.createMarker(atByteOffset: 3, bias: .left)
-        let mMaxT = buffer.createMarker(atByteOffset: 3, bias: .right)
-        let mMin = buffer.createMarker(atByteOffset: 0, bias: .left)
+        let mMaxNil: MarkerID = 0
+        buffer.createMarker(id: mMaxNil, atByteOffset: 3, bias: .left)
+        let mMaxT: MarkerID = 1
+        buffer.createMarker(id: mMaxT, atByteOffset: 3, bias: .right)
+        let mMin: MarkerID = 2
+        buffer.createMarker(id: mMin, atByteOffset: 0, bias: .left)
         buffer.replaceSubrange(3..<3, with: "Z")
         #expect(buffer.text.toString() == "abcZ")
         #expect(buffer.markers.rankPosition(of: mMaxNil) == 3)
@@ -280,9 +299,12 @@ struct MarkerTreeTests {
     func oracleDeleteWholeBuffer() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdef")
-        let m1 = buffer.createMarker(atByteOffset: 0, bias: .left)
-        let m2 = buffer.createMarker(atByteOffset: 2, bias: .left)
-        let m3 = buffer.createMarker(atByteOffset: 5, bias: .right)
+        let m1: MarkerID = 0
+        buffer.createMarker(id: m1, atByteOffset: 0, bias: .left)
+        let m2: MarkerID = 1
+        buffer.createMarker(id: m2, atByteOffset: 2, bias: .left)
+        let m3: MarkerID = 2
+        buffer.createMarker(id: m3, atByteOffset: 5, bias: .right)
         buffer.replaceSubrange(0..<6, with: "")
         #expect(buffer.text.toString() == "")
         #expect(buffer.markers.rankPosition(of: m1) == 0)
@@ -304,8 +326,10 @@ struct MarkerTreeTests {
     func oracleZeroLengthOps() {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "abcdef")
-        let mNil = buffer.createMarker(atByteOffset: 1, bias: .left)
-        let mT = buffer.createMarker(atByteOffset: 1, bias: .right)
+        let mNil: MarkerID = 0
+        buffer.createMarker(id: mNil, atByteOffset: 1, bias: .left)
+        let mT: MarkerID = 1
+        buffer.createMarker(id: mT, atByteOffset: 1, bias: .right)
         buffer.replaceSubrange(1..<1, with: "")
         buffer.replaceSubrange(1..<1, with: "")
         #expect(buffer.text.toString() == "abcdef")
@@ -331,7 +355,8 @@ struct MarkerTreeTests {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "aé漢b")
         // Marker at 1-based char 3 == "before 漢" == byte offset 3 ("a"=1 byte, "é"=2 bytes).
-        let m = buffer.createMarker(atByteOffset: 3, bias: .left)
+        let m: MarkerID = 0
+        buffer.createMarker(id: m, atByteOffset: 3, bias: .left)
         // Insert "漢" (3 bytes) at 1-based char 2 == byte offset 1 (right after "a").
         buffer.replaceSubrange(1..<1, with: "漢")
         #expect(buffer.text.toString() == "a漢é漢b")

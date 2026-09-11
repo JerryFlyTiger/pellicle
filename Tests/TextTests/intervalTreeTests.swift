@@ -33,8 +33,9 @@ struct IntervalTreeTests {
     ) -> (buffer: BufferSnapshot, id: IntervalID) {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "0123456789")
-        let id = buffer.createInterval(
-            byteRange: 2..<6, frontAdvance: frontAdvance, rearAdvance: rearAdvance)
+        let id: IntervalID = 0
+        buffer.createInterval(
+            id: id, byteRange: 2..<6, frontAdvance: frontAdvance, rearAdvance: rearAdvance)
         return (buffer, id)
     }
 
@@ -272,7 +273,8 @@ struct IntervalTreeTests {
             for ra in [false, true] {
                 var buffer = BufferSnapshot()
                 buffer.replaceSubrange(0..<0, with: "0123456789")
-                let id = buffer.createInterval(byteRange: 4..<4, frontAdvance: fa, rearAdvance: ra)
+                let id: IntervalID = 0
+                buffer.createInterval(id: id, byteRange: 4..<4, frontAdvance: fa, rearAdvance: ra)
                 buffer.replaceSubrange(4..<4, with: "X", insertBeforeMarkers: true)
                 let span = buffer.intervals.rankSpan(of: id)
                 #expect(span?.range == 5..<5, "empty-ibm fa=\(fa) ra=\(ra)")
@@ -309,8 +311,9 @@ struct IntervalTreeTests {
         for row in rows {
             var buffer = BufferSnapshot()
             buffer.replaceSubrange(0..<0, with: "0123456789")
-            let id = buffer.createInterval(
-                byteRange: 4..<4, frontAdvance: row.fa, rearAdvance: row.ra)
+            let id: IntervalID = 0
+            buffer.createInterval(
+                id: id, byteRange: 4..<4, frontAdvance: row.fa, rearAdvance: row.ra)
             buffer.replaceSubrange(4..<4, with: "X")
             let span = buffer.intervals.rankSpan(of: id)
             #expect(
@@ -763,9 +766,11 @@ struct IntervalTreeTests {
     func bufferSnapshotFunnelKeepsTreesInStep() throws {
         var buffer = BufferSnapshot()
         buffer.replaceSubrange(0..<0, with: "0123456789")
-        let markerID = buffer.createMarker(atByteOffset: 5, bias: .left)
-        let intervalID = buffer.createInterval(
-            byteRange: 3..<7, frontAdvance: true, rearAdvance: false)
+        let markerID: MarkerID = 0
+        buffer.createMarker(id: markerID, atByteOffset: 5, bias: .left)
+        let intervalID: IntervalID = 0
+        buffer.createInterval(
+            id: intervalID, byteRange: 3..<7, frontAdvance: true, rearAdvance: false)
 
         buffer.replaceSubrange(2..<2, with: "XY")
         try buffer.markers.checkInvariants()

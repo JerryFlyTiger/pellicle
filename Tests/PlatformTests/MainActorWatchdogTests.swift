@@ -114,6 +114,18 @@ struct MainActorWatchdogTests {
         // Without the guard in runOnDedicatedThread(), the released thread publishes,
         // enters runLoop.run(), and never exits: close()'s semaphore wait times out after
         // five seconds and `isThreadAlive` stays true.
+        // **The deadlines below are starvation margins, not assertions about speed.** Each
+        // one waits for a hop onto another thread; none of them is measuring how long the
+        // product takes. They were 5, 5 and 10 seconds and the middle one timed out twice
+        // during M1.5's gate runs, both times inside a heavily loaded `swift test --parallel`
+        // -- the first had its slowest suite at 247 s, and the second's log was overwritten
+        // by the next gate run before anyone read it, so it has no quotable figure.
+        // `close()` is dispatched to the global queue, and under a saturated machine it need
+        // not be scheduled promptly. Measured on this machine at the same commit: run alone,
+        // the whole suite is 0.70-0.75 s, 12 runs out of 12 green; the failing run that was
+        // captured took 5.775 s, i.e. exactly the deadline. A regression that really
+        // leaves the thread running still fails here, it just takes the full deadline to do
+        // it -- the same trade `expectThreadGone` documents below.
         let reachedWindow = DispatchSemaphore(value: 0)
         let releaseThread = DispatchSemaphore(value: 0)
         let markedClosed = DispatchSemaphore(value: 0)
@@ -127,15 +139,15 @@ struct MainActorWatchdogTests {
             },
             afterMarkClosedHook: { markedClosed.signal() })
 
-        #expect(reachedWindow.wait(timeout: .now() + 5) == .success)
+        #expect(reachedWindow.wait(timeout: DispatchTime.now() + 60) == .success)
         DispatchQueue.global().async {
             watchdog.close()
             closeReturned.signal()
         }
-        #expect(markedClosed.wait(timeout: .now() + 5) == .success)
+        #expect(markedClosed.wait(timeout: DispatchTime.now() + 60) == .success)
         releaseThread.signal()
 
-        #expect(closeReturned.wait(timeout: .now() + 10) == .success)
+        #expect(closeReturned.wait(timeout: DispatchTime.now() + 60) == .success)
         expectThreadGone(watchdog)
         #expect(watchdog.isRunning == false)
     }
